@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Video Upscaler — sites</title>
+<style>
+  :root { color-scheme: dark light; }
+  body { font: 14px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", Segoe UI, sans-serif;
+         max-width: 620px; margin: 44px auto; padding: 0 22px; color: #e9edf2; background: #11141a; }
+  h1 { font-size: 19px; margin: 0 0 6px; }
+  p.sub { color: #8b95a3; margin: 0 0 26px; font-size: 13px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: #8b95a3;
+       margin: 30px 0 10px; font-weight: 600; }
+  .card { background: #171b24; border: 1px solid #262d3d; border-radius: 11px; padding: 14px 16px; }
+  .add { display: flex; gap: 8px; }
+  input[type=text] { flex: 1; background: #0e1117; border: 1px solid #2b3346; color: #e9edf2;
+                     border-radius: 8px; padding: 9px 11px; font: inherit; font-size: 13px; }
+  input[type=text]:focus { outline: none; border-color: #5b8cff; }
+  button { background: #3b62d9; border: 1px solid #5b8cff; color: #fff; border-radius: 8px;
+           padding: 9px 15px; font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap; }
+  button:hover { background: #4a71e8; }
+  button.ghost { background: transparent; border-color: #39425a; color: #9aa4b2; padding: 5px 11px; }
+  button.ghost:hover { background: #1f2635; color: #e9edf2; }
+  ul { list-style: none; padding: 0; margin: 12px 0 0; }
+  li { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid #232b3d; }
+  li:first-child { border-top: 0; }
+  li code { flex: 1; font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #c8d0da; }
+  .empty { color: #6c7686; font-size: 13px; padding: 6px 0; }
+  .quick { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .quick button { background: #1f2635; border-color: #313a51; color: #c8d0da; font-size: 12px; padding: 6px 11px; }
+  .quick button:hover { background: #2a3346; color: #fff; }
+  .note { color: #8b95a3; font-size: 12.5px; margin-top: 10px; }
+  kbd { background: #232b3d; border: 1px solid #39425a; border-bottom-width: 2px; border-radius: 5px;
+        padding: 1px 6px; font: 11.5px ui-monospace, Menlo, monospace; color: #e9edf2; }
+  .ok { color: #3ddc97; } .warn { color: #f5b642; }
+  #msg { font-size: 12.5px; }
+  #msg:not(:empty) { margin-top: 12px; }
+  ul:not(:empty) { margin-top: 4px; }
+  a { color: #7aa2ff; }
+</style>
+</head>
+<body>
+  <h1>Video Upscaler</h1>
+  <p class="sub">Pick the sites where it should turn itself on. Everywhere else, invoke it manually.</p>
+
+  <h2>Always upscale on these sites</h2>
+  <div class="card">
+    <div class="add">
+      <input type="text" id="site" placeholder="https://www.youtube.com" spellcheck="false">
+      <button id="addBtn">Allow site</button>
+    </div>
+    <div class="quick" id="quick"></div>
+    <div id="msg"></div>
+    <ul id="list"></ul>
+  </div>
+
+  <h2>Other ways to invoke it</h2>
+  <div class="card">
+    <p style="margin:0 0 10px">
+      <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>U</kbd> &nbsp;— toggle on the current tab.
+      Change it at <a href="#" id="shortcuts">chrome://extensions/shortcuts</a>.
+    </p>
+    <p style="margin:0 0 10px"><b>Right-click</b> a video or the page → <i>Upscale video on this page</i>.</p>
+    <p style="margin:0">
+      <b>Pin the toolbar icon</b> — click the puzzle-piece 🧩 in Chrome's toolbar, then the pin next to
+      Video Upscaler. One click from then on, and the icon shows <b>ON</b> while it is active.
+    </p>
+  </div>
+
+  <p class="note">
+    Allowing a site grants this extension permission to read and change pages on that site — that is what
+    lets it run without being asked. Remove a site at any time and the permission is revoked with it.
+  </p>
+
+<script src="options.js"></script>
+</body>
+</html>

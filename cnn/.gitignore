@@ -1,0 +1,6 @@
+# Training scratch: a 355 MB film, its extracted frames, and the patch cache.
+# All reproducible with `python train.py prepare`.
+data/
+.venv/
+model.pt
+__pycache__/

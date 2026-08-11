@@ -1,0 +1,475 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Video Upscaler — DOM integration</title>
+<style>
+  body { background:#0d1018; color:#dfe6ef; font:13px/1.6 -apple-system,sans-serif; margin:24px; }
+  h1 { font-size:15px; margin:0 0 14px; }
+  pre { background:#151a26; border:1px solid #232b3d; border-radius:8px; padding:12px; white-space:pre-wrap; }
+  .ok { color:#3ddc97 } .bad { color:#ff6b6b } .skip { color:#f5b642 }
+  /* Deliberately awkward container: static position, a border and padding, and
+     an element box wider than the video's aspect so there are letterbox bars.
+     This is exactly where overlay-positioning maths goes wrong. */
+  #stage { position:static; border:7px solid #2a3350; padding:11px 19px; margin-top:16px;
+           width:720px; background:#000; }
+  video { display:block; width:720px; height:300px; background:#000; object-fit:contain; }
+</style>
+<h1>Video Upscaler — DOM integration</h1>
+<pre id="log">running…</pre>
+<div id="stage"><video id="v" muted playsinline autoplay></video></div>
+
+<script>
+/* content.js reads chrome.storage when present; in a bare page it must fall
+   back to defaults without throwing. We assert that rather than shimming it. */
+const results = [];
+function check(name, pass, detail) {
+  results.push({ name, pass: !!pass, detail: detail ?? '' });
+  document.getElementById('log').innerHTML = results.map(r =>
+    `<span class="${r.pass ? 'ok' : 'bad'}">${r.pass ? 'PASS' : 'FAIL'}</span>  ${r.name}` +
+    (r.detail ? `\n        ${r.detail}` : '')).join('\n');
+}
+
+const SRC_W = 480, SRC_H = 270;             // 16:9 source in a 720x300 box
+const src = document.createElement('canvas');
+src.width = SRC_W; src.height = SRC_H;
+const sctx = src.getContext('2d');
+let f = 0;
+setInterval(() => {
+  for (let y = 0; y < SRC_H; y += 6) for (let x = 0; x < SRC_W; x += 6) {
+    const v = ((x + y + f) % 24 < 12) ? 235 : 30;
+    sctx.fillStyle = `rgb(${v},${(v * 0.7) | 0},${255 - v})`;
+    sctx.fillRect(x, y, 6, 6);
+  }
+  f += 2;
+}, 33);
+
+const video = document.getElementById('v');
+video.srcObject = src.captureStream(30);
+</script>
+<script src="../cnn-weights.js"></script>
+<script src="../core.js"></script>
+<script src="../source-probe.js"></script>
+<script src="../content.js"></script>
+<script>
+(async () => {
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
+  const t0 = performance.now();
+  while (video.videoWidth === 0 && performance.now() - t0 < 6000) await wait(50);
+  check('video has metadata', video.videoWidth === SRC_W, `${video.videoWidth}×${video.videoHeight}`);
+
+  check('content script did not throw without chrome.* APIs', !!window.__VU__ && window.__VU__.on);
+
+  // scan() runs on loadedmetadata/play and on a 2 s interval — give it room
+  let overlay = null;
+  const t1 = performance.now();
+  while (!(overlay = document.querySelector('[data-vu-overlay]')) && performance.now() - t1 < 6000) await wait(120);
+  check('overlay attached without a page mutation', !!overlay);
+  if (!overlay) { done(); return; }
+
+  check('overlay is a sibling of the video (inherits player stacking)',
+        overlay.parentElement === video.parentElement, overlay.parentElement.id || overlay.parentElement.tagName);
+
+  check('static parent was promoted to relative',
+        getComputedStyle(video.parentElement).position === 'relative');
+
+  // elementFromPoint works in viewport coordinates, so the video has to be on
+  // screen. Scrolling also exercises the geometry sync against a scroll offset.
+  video.scrollIntoView({ block: 'center' });
+  await wait(500);
+
+  // --- geometry: overlay must sit exactly on the letterboxed picture -------
+  const vr = video.getBoundingClientRect();
+  const or_ = overlay.getBoundingClientRect();
+  const arV = SRC_W / SRC_H;
+  const expW = vr.height * arV;                  // 300 * 16/9 = 533.33 (pillarboxed)
+  const expX = vr.left + (vr.width - expW) / 2;
+  const dx = Math.abs(or_.left - expX), dw = Math.abs(or_.width - expW);
+  const dy = Math.abs(or_.top - vr.top), dh = Math.abs(or_.height - vr.height);
+  check('overlay matches the object-fit:contain picture box, not the element box',
+        dx < 1.5 && dw < 1.5 && dy < 1.5 && dh < 1.5,
+        `overlay ${or_.width.toFixed(1)}×${or_.height.toFixed(1)} @${or_.left.toFixed(1)},${or_.top.toFixed(1)}  ` +
+        `expected ${expW.toFixed(1)}×${vr.height.toFixed(1)} @${expX.toFixed(1)},${vr.top.toFixed(1)}`);
+  check('overlay is narrower than the element box (pillarbox respected)',
+        or_.width < vr.width - 20, `${or_.width.toFixed(0)} vs element ${vr.width.toFixed(0)}`);
+
+  // --- the canvas is actually rendering ----------------------------------
+  const cv = overlay.querySelector('canvas');
+  const dpr = window.devicePixelRatio || 1;
+  check('canvas backing store is device-pixel sized', !!cv && cv.width >= Math.round(expW * dpr) - 2,
+        cv ? `${cv.width}×${cv.height} (dpr ${dpr})` : 'no canvas');
+
+  // The drawing buffer is not preserved across compositing, so reading it from
+  // outside the frame callback races the compositor and intermittently returns
+  // black. Force a synchronous draw and read in the SAME task.
+  const gl = cv.getContext('webgl2');
+  const px = new Uint8Array(4 * 64);
+  const drawn = window.__VU__.redraw();
+  gl.readPixels((cv.width / 2) | 0, (cv.height / 2) | 0, 8, 8, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  let sum = 0; for (let i = 0; i < px.length; i += 4) sum += px[i] + px[i + 1] + px[i + 2];
+  check('canvas contains live pixels (not black)', sum / (64 * 3) > 8,
+        `mean luma ${(sum / (64 * 3)).toFixed(1)} across ${drawn} unit(s)`);
+
+  // --- pointer events must pass through to the player --------------------
+  // NB: asserted via computed style, not elementFromPoint. Headless panes can
+  // report a 0x0 layout viewport, which makes every hit-test return null and
+  // the test vacuously "fail". pointer-events is the actual mechanism.
+  const ovPE = getComputedStyle(overlay).pointerEvents;
+  const cvPE = getComputedStyle(cv).pointerEvents;
+  check('overlay + canvas are click-through (pointer-events:none)',
+        ovPE === 'none' && cvPE === 'none', `overlay=${ovPE} canvas=${cvPE}`);
+
+  // and the overlay must not be a focus/AT target either
+  check('overlay is not keyboard or AT reachable',
+        overlay.tabIndex <= 0 && !overlay.hasAttribute('role'));
+
+  // --- control panel ------------------------------------------------------
+  const panel = document.querySelector('[data-vu-panel]');
+  const panelStatText = () => panel.shadowRoot.querySelector('[data-stat]').innerText;
+  // The CNN is off by default now, so the readout must NOT claim it. This also
+  // guards the honesty of that readout: it reports what runs, not what is set.
+  check('readout does not claim the neural stage while it is off',
+        !/neural/.test(panelStatText()),
+        panelStatText().replace(/\n/g, ' | '));
+
+  check('control panel mounted in a shadow root',
+        !!panel && !!panel.shadowRoot && !!panel.shadowRoot.querySelector('.wrap'));
+
+  // This page sets no __VU_MANUAL__ flag, so content.js treats it as a per-site
+  // auto-start: it must come up collapsed rather than opening over the video.
+  check('auto-start brings the panel up collapsed',
+        !!panel.shadowRoot.querySelector('.wrap.collapsed'));
+
+  // --- object-fit: cover (this is what YouTube uses) -----------------------
+  // Regression guard: an earlier build refused GPU mode on `cover` outright and
+  // dropped the entire site to filter mode.
+  video.style.objectFit = 'cover';
+  await wait(2600);                      // let the scan/geometry tick pick it up
+  const coverOverlay = document.querySelector('[data-vu-overlay]');
+  const coverStat = panel.shadowRoot.querySelector('[data-stat]').innerText;
+  // Assert the CONDITION (not on the CSS-filter fallback, real overlay present)
+  // rather than the readout wording, which changes as stages are added.
+  check('object-fit: cover still runs on the GPU',
+        !/CSS filter/.test(coverStat) && /RCAS/.test(coverStat) && !!coverOverlay,
+        coverStat.replace(/\n/g, ' | '));
+  if (coverOverlay) {
+    const cr = coverOverlay.getBoundingClientRect();
+    const vr2 = video.getBoundingClientRect();
+    check('cover fills the element box (no letterbox)',
+          Math.abs(cr.width - vr2.width) < 1.5 && Math.abs(cr.height - vr2.height) < 1.5,
+          `overlay ${cr.width.toFixed(0)}x${cr.height.toFixed(0)} vs element ${vr2.width.toFixed(0)}x${vr2.height.toFixed(0)}`);
+  }
+  video.style.objectFit = 'contain';
+  await wait(600);
+
+  // --- "pick max once and it stays" ---------------------------------------
+  // loadSettings only restores keys present in DEFAULTS, so a preset value that
+  // is missing from that list silently reverts on every page load. That is the
+  // failure mode behind "why do I have to set this every time".
+  {
+    const missing = [];
+    for (const [name, vals] of Object.entries(window.__VU__.presets)) {
+      for (const k of Object.keys(vals)) {
+        if (!window.__VU__.persistedKeys.includes(k)) missing.push(`${name}.${k}`);
+      }
+    }
+    for (const k of ['preset', 'adaptive', 'neural', 'upscaler', 'renderScale']) {
+      if (!window.__VU__.persistedKeys.includes(k)) missing.push(k);
+    }
+    check('every preset value survives a reload (present in the persisted set)',
+          missing.length === 0,
+          missing.length ? 'would silently reset: ' + missing.join(', ')
+                         : `${window.__VU__.persistedKeys.length} keys persisted`);
+  }
+
+  // --- a retuned preset must actually reach someone who already picked it --
+  // Simulates the real failure: settings saved under an older definition of
+  // 'max' are restored from storage, and must NOT win over the current code.
+  {
+    const S0 = window.__VU__.settings;
+    window.__VU__.preset('max');
+    const shipped = { detail: S0.detail, denoise: S0.denoise, shadow: S0.shadow };
+    // pretend storage handed back last month's numbers
+    S0.detail = 0.80; S0.denoise = 0.16; S0.shadow = 0.40; S0.preset = 'max';
+    window.__VU__.reconcile();
+    check('a retuned preset overrides stale saved values',
+          S0.detail === shipped.detail && S0.denoise === shipped.denoise &&
+          S0.shadow === shipped.shadow,
+          `stale 0.80/0.16/0.40 -> ${S0.detail}/${S0.denoise}/${S0.shadow} (shipped)`);
+
+    // ...but a hand-tuned setup must survive untouched
+    S0.preset = 'custom'; S0.detail = 0.73;
+    window.__VU__.reconcile();
+    check('a custom setup is not clobbered by preset reconciliation',
+          S0.preset === 'custom' && S0.detail === 0.73, `detail stayed ${S0.detail}`);
+    // Hand back a NON-adaptive preset: the next block snapshots current state as
+    // its "restore to" target, and leaving it on max makes that block's
+    // adaptation-off assertion unsatisfiable.
+    window.__VU__.preset('standard');
+  }
+
+  // --- Max preset ---------------------------------------------------------
+  const before = JSON.parse(JSON.stringify(window.__VU__.settings));
+  window.__VU__.preset('max');
+  const S = window.__VU__.settings;
+  check('Max preset applies and switches on adaptation',
+        S.preset === 'max' && S.adaptive === true && S.upscaler === 'fsr' && S.maxWidth > 3840,
+        `preset=${S.preset} adaptive=${S.adaptive} upscaler=${S.upscaler} cap=${S.maxWidth}px`);
+
+  // NOT "max has the biggest sliders". That premise is what shipped a preset
+  // which put a compressed source 7 dB further from ground truth than doing
+  // nothing. Aggressive is not the same as good. What max must actually be is
+  // the preset that turns every RECONSTRUCTION stage on — the parts that repair
+  // the picture — while keeping the LOOK stages restrained enough not to
+  // amplify artifacts. The ground-truth gate in harness.html enforces the
+  // second half; this enforces the first.
+  {
+    const m = window.__VU__.presets.max;
+    // 'neural' deliberately excluded: measured at +0.09 dB on compressed and
+    // -0.25 dB on clean content vs EASU alone, so it is off by default.
+    const recon = ['chroma', 'deband', 'denoise', 'temporal'];
+    const missing = recon.filter((k) => !(m[k] > 0));
+    check('max turns on every reconstruction stage',
+          missing.length === 0,
+          missing.length ? 'not enabled: ' + missing.join(', ')
+                         : recon.map((k) => `${k}=${m[k]}`).join(' '));
+    check('max keeps the look stages restrained enough not to amplify artifacts',
+          m.detail <= 0.2 && m.shadow <= 0.15 && m.vibrance <= 0.3,
+          `detail=${m.detail} shadow=${m.shadow} vibrance=${m.vibrance} ` +
+          `(detail is the destructive one: 1.27 dB on its own at 0.30)`);
+  }
+
+  // Max must mean quality-optimal, not every-slider-pinned. All-1.0 would ring
+  // and smear; if anyone ever "fixes" this preset by maxing it, fail loudly.
+  check('Max is quality-optimal, not all sliders pinned',
+        S.sharpen < 0.8 && S.denoise < 0.4 && S.saturation < 1.1,
+        `sharpen=${S.sharpen} denoise=${S.denoise} saturation=${S.saturation}`);
+
+  // --- auto restore: one preset serving both a Blu-ray and a bad rip --------
+  {
+    const f = window.__VU__.autoDeblock;
+    // The curve was fitted to the strengths that measured best against a clean
+    // original, at the blockiness the engine actually reports for each source.
+    // These are the four calibration points; if the curve is retuned they must
+    // be re-derived, not loosened.
+    const pts = [
+      ['clean plate',  1.06, 0.00, 0.12],
+      ['crf45 rip',    2.23, 0.60, 0.15],
+      ['JPEG q=0.25',  2.01, 0.70, 0.15],
+      ['JPEG q=0.12',  2.82, 0.85, 0.12],
+    ];
+    const got = pts.map(([n, b, want, tol]) => ({ n, b, want, tol, v: f(b) }));
+    check('auto strength lands on the measured optimum for every source tested',
+          got.every((g) => Math.abs(g.v - g.want) <= g.tol),
+          got.map((g) => `${g.n}: ${g.v.toFixed(2)} vs ${g.want}`).join('  ·  '));
+    // Back-projection is the biggest single quality gain here on a clean source
+    // and actively destructive on a blocky one — it reprints the artifacts the
+    // restore stage just removed. The gate is the whole safety story.
+    {
+      const g = window.__VU__.autoBackproject;
+      check('back-projection runs full on a clean source and is OFF on any blocky one',
+            g(1.06) === 1 && g(1.12) > 0.9 && g(1.35) === 0 && g(1.59) === 0 &&
+            g(2.23) === 0 && g(2.82) === 0,
+            `clean 1.06->${g(1.06).toFixed(2)}  1.12->${g(1.12).toFixed(2)}  ` +
+            `1.35->${g(1.35).toFixed(2)}  compressed 1.59->${g(1.59).toFixed(2)}  ` +
+            `2.23->${g(2.23).toFixed(2)} — forced on at 1.59 it measured blockiness ` +
+            `1.312 -> 1.570, undoing the restore stage entirely`);
+    }
+
+    check('auto strength is monotone and does nothing to a clean source',
+          f(1.0) === 0 && f(1.15) === 0 && f(1.5) < f(2.0) && f(2.0) < f(3.0) && f(9) <= 0.9,
+          `1.0->${f(1.0).toFixed(2)}  1.5->${f(1.5).toFixed(2)}  ` +
+          `2.0->${f(2.0).toFixed(2)}  3.0->${f(3.0).toFixed(2)}  9->${f(9).toFixed(2)}`);
+
+    check('auto restore is on for the adaptive presets and off for the look presets',
+          (window.__VU__.preset('rescue'), S.autoRestore === true) &&
+          (window.__VU__.preset('max'), S.autoRestore === true) &&
+          (window.__VU__.preset('film'), S.autoRestore === false) &&
+          (window.__VU__.preset('anime'), S.autoRestore === false),
+          `rescue/max measure the source; film/anime give you the look you picked`);
+
+    // Same trap as the render-scale governor: a value that is rewritten every
+    // two seconds makes the slider look broken unless touching it takes over.
+    window.__VU__.preset('rescue');
+    S.deblock = 0.20;
+    if (S.autoRestore) S.autoRestore = false;    // mirrors the panel's input handler
+    check('setting Deblock by hand takes control back from the measurement',
+          S.autoRestore === false && S.deblock === 0.20,
+          `autoRestore=${S.autoRestore} deblock=${S.deblock}`);
+    window.__VU__.preset('max');
+  }
+
+  // --- the better source ---------------------------------------------------
+  // The probe runs in the PAGE's world against a player object this extension
+  // does not own, so it is driven here against a mock with the same shape.
+  //
+  // What this DOES prove: it finds the player, reads the tiers, picks the best,
+  // asks for a ceiling above the listed best (so an under-reported Premium tier
+  // is still reachable), reports honestly when it cannot act, and never throws
+  // on a page that has no player at all.
+  //
+  // What it does NOT prove: that YouTube itself honours the request. That needs
+  // a real youtube.com page, which could not be loaded from this environment,
+  // so the READOUT deliberately says "asked for its best" and re-probes to show
+  // what the player actually settled on, rather than claiming success.
+  {
+    const mk = (levels, current) => {
+      const calls = [];
+      const el = document.createElement('div');
+      el.id = 'movie_player';
+      el.getAvailableQualityLevels = () => levels.slice();
+      el.getPlaybackQuality = () => current;
+      el.setPlaybackQualityRange = (a, b) => calls.push(['range', a, b]);
+      el.setPlaybackQuality = (q) => calls.push(['set', q]);
+      document.body.appendChild(el);
+      return { el, calls };
+    };
+    // The page's <video> is what the probe measures the real answer from.
+    const setVideoSize = (h) => {
+      const v = document.querySelector('video');
+      if (!v) return;
+      try {
+        Object.defineProperty(v, 'videoHeight', { value: h, configurable: true });
+        Object.defineProperty(v, 'videoWidth', { value: Math.round(h * 16 / 9), configurable: true });
+      } catch (_) { /* already defined by a previous case */ }
+    };
+
+    const m = mk(['hd2160', 'hd1440', 'hd1080', 'hd720', 'auto'], 'hd720');
+    setVideoSize(720);
+    const probed = window.vuProbeSource(false);
+    check('the source probe finds the player and reads its tiers',
+          probed.kind === 'youtube' && probed.best === 'hd2160' && probed.current === 'hd720',
+          `kind=${probed.kind} best=${probed.best} current=${probed.current} ` +
+          `(auto is filtered out of the list)`);
+
+    check('probing alone changes nothing',
+          m.calls.length === 0,
+          `a probe with apply=false made ${m.calls.length} calls to the player — ` +
+          `it must be safe to run on every scan`);
+
+    const applied = window.vuProbeSource(true);
+    const range = m.calls.find((c) => c[0] === 'range');
+    check('asking for the best requests a ceiling ABOVE the listed best',
+          applied.requested === true && range && range[1] === 'hd2160' && range[2] === 'highres',
+          `setPlaybackQualityRange(${range ? range[1] + ', ' + range[2] : 'not called'}) — ` +
+          `the ceiling is deliberately higher than anything listed, because the ` +
+          `Premium enhanced-bitrate tiers are omitted from getAvailableQualityLevels()`);
+    m.el.remove();
+
+    // Verified on a real video: after a successful request the player kept
+    // returning the OLD tier from getPlaybackQuality() for more than forty
+    // seconds, while its own stats showed the 2160p stream already selected. A
+    // readout that believes it reports failure while the feature is working.
+    // (getElementById returns the FIRST match, so the previous mock has to be
+    // out of the document before this one goes in.)
+    {
+      const lag = mk(['hd2160', 'hd1440', 'hd1080', 'auto'], 'hd1080');  // player still says 1080
+      setVideoSize(2160);                                                // decoder says otherwise
+      const r = window.vuProbeSource(false);
+      check('the readout trusts the decoded frame, not the player\'s lagging opinion',
+            r.current === 'hd2160' && r.currentFrom === 'decoded' && r.reported === 'hd1080',
+            `player claims ${r.reported}, decoder is producing 2160p, readout says ` +
+            `${r.current} (from ${r.currentFrom}) — measured lagging by 40+ seconds on a real video`);
+      lag.el.remove();
+    }
+
+    // A player already at its best must not be offered an upgrade, or the panel
+    // is nagging about something it cannot improve.
+    const m2 = mk(['hd1080', 'hd720', 'auto'], 'hd1080');
+    setVideoSize(1080);
+    const atBest = window.vuProbeSource(false);
+    check('a player already at its best reports no better tier',
+          atBest.best === 'hd1080' && atBest.current === 'hd1080',
+          `best=${atBest.best} current=${atBest.current}`);
+    m2.el.remove();
+
+    const none = window.vuProbeSource(true);
+    check('a page with no player probes cleanly instead of throwing',
+          none && none.kind === 'generic' && !none.requested,
+          `kind=${none.kind} — every non-YouTube site takes this path`);
+    check('and still reports how far the source is being stretched',
+          typeof none.srcW === 'number' && typeof none.boxW === 'number',
+          `source ${none.srcW}x${none.srcH} into a ${none.boxW}x${none.boxH} box — ` +
+          `the honest number for sites whose quality we cannot drive`);
+  }
+
+  // governor: drops must cost render scale, clean windows must earn it back
+  const g = window.__VU__.governor;
+  S.renderScale = 1.20; g.reset();
+  g.windowStart = performance.now() - 3000;
+  g.presented = 100; g.handled = 80;                 // 20% dropped
+  const backedOff = g.tick(performance.now());
+  check('governor backs off render scale when frames drop',
+        backedOff && S.renderScale < 1.20, `1.20 -> ${S.renderScale.toFixed(2)} on a 20% drop rate`);
+
+  const low = S.renderScale;
+  const cleanWindow = () => {
+    g.windowStart = performance.now() - 3000;
+    g.presented = 100; g.handled = 100;              // perfectly clean
+    g.tick(performance.now());
+  };
+
+  // Hysteresis: a drop must buy several quiet windows before we spend again,
+  // or the governor oscillates between two scales forever.
+  cleanWindow(); cleanWindow();
+  check('governor holds back right after a drop (hysteresis)', S.renderScale === low,
+        `still ×${S.renderScale.toFixed(2)} two clean windows after backing off`);
+
+  cleanWindow(); cleanWindow();
+  check('governor climbs again once frames stay clean', S.renderScale > low,
+        `${low.toFixed(2)} -> ${S.renderScale.toFixed(2)} after four clean windows (~8s)`);
+
+  // and it must never run away
+  for (let i = 0; i < 40; i++) {
+    g.windowStart = performance.now() - 3000;
+    g.presented = 100; g.handled = 100;
+    g.tick(performance.now());
+  }
+  // Ceiling is the visible-pixel bound, not the GPU's tolerance: past ~1.25x the
+  // video's device-pixel size the compositor discards the extra on the way down.
+  check('governor stops at the visible-pixel ceiling, not the GPU limit',
+        S.renderScale <= 1.25 + 1e-9,
+        `settles at ×${S.renderScale.toFixed(2)} after 40 clean windows (ceiling 1.25)`);
+
+  // Dragging Render x by hand must take control away from the governor,
+  // otherwise the slider appears to snap back on its own.
+  window.__VU__.preset('max');
+  const rsInput = panel.shadowRoot.querySelector('input[data-k="renderScale"]');
+  rsInput.value = '1.60';
+  rsInput.dispatchEvent(new Event('input', { bubbles: true }));
+  check('manual Render x takes control back from the governor',
+        window.__VU__.settings.adaptive === false && window.__VU__.settings.renderScale === 1.6,
+        `adaptive=${window.__VU__.settings.adaptive} renderScale=${window.__VU__.settings.renderScale}`);
+
+  window.__VU__.preset(before.preset || 'standard');
+  check('leaving Max turns adaptation back off',
+        window.__VU__.settings.adaptive === false && window.__VU__.settings.maxWidth === 3840);
+
+  // --- toggle must fully clean up ----------------------------------------
+  window.__VU__.toggle();
+  await wait(200);
+  check('toggle off removes overlay, panel and inline filters',
+        !document.querySelector('[data-vu-overlay]') &&
+        !document.querySelector('[data-vu-panel]') &&
+        !video.style.filter,
+        `parent position restored: "${video.parentElement.style.position || '(none)'}"`);
+
+  // --- toggling back on is a deliberate invocation ------------------------
+  window.__VU__.toggle();
+  await wait(600);
+  const panel2 = document.querySelector('[data-vu-panel]');
+  check('manual invoke re-attaches and opens the panel',
+        !!panel2 && !!panel2.shadowRoot.querySelector('.wrap') &&
+        !panel2.shadowRoot.querySelector('.wrap.collapsed') &&
+        !!document.querySelector('[data-vu-overlay]'));
+
+  done();
+
+  function done() {
+    const failed = results.filter(r => !r.pass);
+    document.title = failed.length ? `FAIL ${failed.length}` : 'ALL PASS';
+    console.log('VU_INTEGRATION ' + JSON.stringify({ pass: failed.length === 0, results }));
+  }
+})().catch(e => {
+  check('harness completed', false, e.stack || e.message);
+  document.title = 'FAIL';
+});
+</script>

@@ -1,0 +1,112 @@
+<!doctype html>
+<!-- Visual A/B for the restore stage. Open in a normal browser window:
+     python3 -m http.server 8731  ->  http://127.0.0.1:8731/test/compare.html
+     Numbers live in the test suite; this is the "does it actually look better"
+     check that only an eye can make. -->
+<meta charset="utf-8">
+<title>Video Upscaler — restore A/B</title>
+<style>
+  body { background:#111; color:#ddd; font:13px/1.5 -apple-system,system-ui,sans-serif;
+         margin:0; padding:20px 24px 40px; }
+  h1 { font-size:15px; font-weight:600; margin:0 0 4px; }
+  p.sub { color:#888; margin:0 0 20px; max-width:70ch; }
+  h2 { font-size:13px; font-weight:600; margin:22px 0 2px; color:#fff; }
+  p.note { color:#888; margin:0 0 8px; max-width:70ch; }
+  .pair { display:flex; gap:10px; flex-wrap:wrap; }
+  figure { margin:0; }
+  figcaption { color:#999; padding:4px 0 0; font-size:12px; }
+  canvas { display:block; image-rendering:pixelated; border:1px solid #333; background:#000; }
+</style>
+<h1>Restore stage — before / after</h1>
+<p class="sub">Each pair is the same pixels, magnified 3× with no smoothing so the
+artifacts are visible at all. Left is the chain as it shipped before today;
+right adds deblock + dering. Look at the flat areas and the edges of objects,
+not at the fine texture — restoring artifacts cannot bring texture back.</p>
+<div id="out"></div>
+<script src="../cnn-weights.js"></script>
+<script src="../core.js"></script>
+<script>
+const out = document.getElementById('out');
+const load = (src) => new Promise((res, rej) => {
+  const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
+});
+function render(source, w, h, opts) {
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const e = VUCore.createEngine(cv);
+  e.upload(source); e.render(opts);
+  const copy = document.createElement('canvas');
+  copy.width = w; copy.height = h;
+  copy.getContext('2d').drawImage(cv, 0, 0);
+  e.dispose();
+  return copy;
+}
+// Blow up a crop with no interpolation, so a block edge reads as a block edge.
+function zoom(srcCanvas, sx, sy, sw, sh, factor) {
+  const c = document.createElement('canvas');
+  c.width = sw * factor; c.height = sh * factor;
+  const x = c.getContext('2d');
+  x.imageSmoothingEnabled = false;
+  x.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, c.width, c.height);
+  return c;
+}
+
+const MAX_OLD = { sharpen: 0.42, detail: 0.12, vibrance: 0.20, shadow: 0.10,
+                  denoise: 0.30, chroma: 0.85, deband: 0.60, temporal: 0,
+                  antiring: 0.80, saturation: 1.02, contrast: 1.01, gain: 1,
+                  split: 0, neural: 0, upscaler: 'fsr', deblock: 0, dering: 0 };
+const RESCUE  = Object.assign({}, MAX_OLD, { sharpen: 0.35, vibrance: 0.18,
+                  denoise: 0.45, deband: 0.75, antiring: 0.85,
+                  deblock: 0.90, dering: 0.70 });
+
+function section(title, note, pairs) {
+  const h = document.createElement('h2'); h.textContent = title; out.appendChild(h);
+  const p = document.createElement('p'); p.className = 'note'; p.textContent = note; out.appendChild(p);
+  const row = document.createElement('div'); row.className = 'pair';
+  for (const [cap, cv] of pairs) {
+    const f = document.createElement('figure');
+    f.appendChild(cv);
+    const c = document.createElement('figcaption'); c.textContent = cap;
+    f.appendChild(c); row.appendChild(f);
+  }
+  out.appendChild(row);
+}
+
+(async () => {
+  const clean = await load('clean.png');
+  const rip   = await load('lowbitrate.png');
+  const W = rip.naturalWidth, H = rip.naturalHeight;
+  const mk = (im) => {
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    c.getContext('2d').drawImage(im, 0, 0, W, H); return c;
+  };
+  const cleanCv = mk(clean), ripCv = mk(rip);
+  const crushed = mk(await new Promise((res) => {
+    const im = new Image(); im.onload = () => res(im);
+    im.src = cleanCv.toDataURL('image/jpeg', 0.12);
+  }));
+
+  const CROP = [300, 90, 200, 100], Z = 3;
+  const cut = (cv) => zoom(cv, CROP[0], CROP[1], CROP[2], CROP[3], Z);
+
+  section('A real crf45 rip',
+          'The fixture the test suite uses. Blocking here is present but mild.',
+          [['before (max)', cut(render(ripCv, W, H, MAX_OLD))],
+           ['after (rescue)', cut(render(ripCv, W, H, RESCUE))]]);
+
+  section('A badly blocked source',
+          'The clean plate crushed to JPEG q=0.12 — same 8x8 transform a video ' +
+          'codec uses. This is what a genuinely bad rip looks like.',
+          [['before (max)', cut(render(crushed, W, H, MAX_OLD))],
+           ['after (rescue)', cut(render(crushed, W, H, RESCUE))],
+           ['the original, for reference', cut(cleanCv)]]);
+
+  section('A clean source — the safety check',
+          'Rescue left on over good footage. If these two differ visibly, the ' +
+          'stage is too aggressive to leave selected.',
+          [['before (max)', cut(render(cleanCv, W, H, MAX_OLD))],
+           ['after (rescue)', cut(render(cleanCv, W, H, RESCUE))]]);
+
+  document.title = 'restore A/B ready';
+})().catch(e => { out.textContent = 'ERROR ' + (e && e.message || e); });
+</script>

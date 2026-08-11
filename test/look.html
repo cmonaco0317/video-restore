@@ -1,0 +1,33 @@
+<!doctype html><meta charset="utf-8"><title>look at it</title>
+<!-- Side-by-side SOURCE / OFF / MAX on a real compressed frame.
+     Kept deliberately: actually LOOKING at the output is what found the problem
+     that ~60 passing numeric tests missed. Serve the folder and open this
+     before trusting any metric about how something looks.
+     Swap the filename below for any PNG in this directory. -->
+<style>body{background:#000;margin:0;font:12px -apple-system,sans-serif;color:#ccc}
+figure{margin:0}figcaption{padding:4px 8px;background:#111}
+canvas{display:block;width:960px;height:400px;image-rendering:auto}</style>
+<div id="w"></div>
+<script src="../cnn-weights.js"></script><script src="../core.js"></script>
+<script>
+const MAXP={sharpen:0.62,detail:0.80,vibrance:0.60,shadow:0.40,denoise:0.16,
+  chroma:0.85,deband:0.60,temporal:0,antiring:0.80,saturation:1.05,contrast:1.03,
+  gain:1,split:0,neural:1,upscaler:'fsr'};
+const OFF={sharpen:0,detail:0,vibrance:0,shadow:0,denoise:0,chroma:0,deband:0,
+  temporal:0,antiring:0,saturation:1,contrast:1,gain:1,split:0,neural:0};
+const im=new Image();
+im.onload=()=>{
+  const s=document.createElement('canvas');s.width=im.naturalWidth;s.height=im.naturalHeight;
+  s.getContext('2d').drawImage(im,0,0);
+  for(const [name,opts] of [['SOURCE (untouched, 2x bilinear)',null],['OFF (engine, all stages 0)',OFF],['MAX',MAXP]]){
+    const c=document.createElement('canvas');c.width=im.naturalWidth*2;c.height=im.naturalHeight*2;
+    if(!opts){const x=c.getContext('2d');x.imageSmoothingEnabled=true;x.drawImage(s,0,0,c.width,c.height);}
+    else{const e=VUCore.createEngine(c);e.upload(s);e.render(opts);}
+    const f=document.createElement('figure');
+    const cap=document.createElement('figcaption');cap.textContent=name;
+    f.appendChild(cap);f.appendChild(c);document.getElementById('w').appendChild(f);
+  }
+  document.title='ready';
+};
+im.src='darkrip.png';
+</script>

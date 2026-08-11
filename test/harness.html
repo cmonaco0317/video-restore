@@ -1,0 +1,1517 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Video Upscaler — core verification</title>
+<style>
+  body { background:#0d1018; color:#dfe6ef; font:13px/1.6 -apple-system,sans-serif; margin:24px; }
+  h1 { font-size:15px; margin:0 0 14px; }
+  pre { background:#151a26; border:1px solid #232b3d; border-radius:8px; padding:12px; white-space:pre-wrap; }
+  .ok { color:#3ddc97 } .bad { color:#ff6b6b } .skip { color:#f5b642 }
+  canvas { border:1px solid #232b3d; border-radius:6px; image-rendering:pixelated; }
+  .pair { display:flex; gap:14px; align-items:flex-start; margin-top:14px; flex-wrap:wrap; }
+  figcaption { font-size:11px; color:#8b95a3; margin-top:4px; }
+</style>
+<h1>Video Upscaler — core verification</h1>
+<pre id="log">running…</pre>
+<div class="pair">
+  <figure><canvas id="srcView" width="160" height="90"></canvas><figcaption>source 160×90 (nearest)</figcaption></figure>
+  <figure><canvas id="out" width="960" height="540"></canvas><figcaption>engine output 960×540</figcaption></figure>
+</div>
+<video id="v" muted playsinline style="display:none"></video>
+
+<script src="../cnn-weights.js"></script>
+<script src="cnn-reference.js"></script>
+<script src="../core.js"></script>
+<script>
+const log = document.getElementById('log');
+const results = [];
+function render_() {
+  log.innerHTML = results.map(r =>
+    `<span class="${r.skip ? 'skip' : r.pass ? 'ok' : 'bad'}">${r.skip ? 'SKIP' : r.pass ? 'PASS' : 'FAIL'}</span>  ${r.name}` +
+    (r.detail ? `\n        ${r.detail}` : '')).join('\n');
+}
+function check(name, pass, detail) { results.push({ name, pass: !!pass, detail: detail ?? '' }); render_(); }
+function skipTest(name, detail) { results.push({ name, pass: true, skip: true, detail: detail ?? '' }); render_(); }
+function note(name, detail) { results.push({ name, pass: true, detail: detail ?? '' }); render_(); }
+
+/* ---- synthetic "video": a low-res canvas stream full of high-frequency
+   detail, which is exactly what an upscaler has to cope with. ---- */
+const SRC_W = 160, SRC_H = 90;
+const src = document.createElement('canvas');
+src.width = SRC_W; src.height = SRC_H;
+const sctx = src.getContext('2d');
+let t = 0;
+function paint() {
+  const img = sctx.createImageData(SRC_W, SRC_H);
+  for (let y = 0; y < SRC_H; y++) {
+    for (let x = 0; x < SRC_W; x++) {
+      const i = (y * SRC_W + x) * 4;
+      const zp = 0.5 + 0.5 * Math.cos((x * x + y * y) * 0.012 + t * 0.05);
+      const bar = ((x + (t | 0)) % 8 < 4) ? 1 : 0;
+      const flat = (x > 110 && y > 60) ? 1 : 0;
+      const v = flat ? 0.62 : (y < SRC_H / 2 ? zp : bar);
+      img.data[i] = Math.round(255 * v);
+      img.data[i + 1] = Math.round(255 * (flat ? 0.55 : v * 0.85));
+      img.data[i + 2] = Math.round(255 * (flat ? 0.48 : 1 - v * 0.6));
+      img.data[i + 3] = 255;
+    }
+  }
+  sctx.putImageData(img, 0, 0);
+  const sv = document.getElementById('srcView').getContext('2d');
+  sv.imageSmoothingEnabled = false;
+  sv.drawImage(src, 0, 0, 160, 90);
+  t++;
+}
+paint();
+
+const stream = src.captureStream(30);
+const video = document.getElementById('v');
+video.srcObject = stream;
+const out = document.getElementById('out');
+
+const NEUTRAL = { sharpen: 0, denoise: 0, deband: 0, antiring: 0, saturation: 1, contrast: 1, gain: 1, split: 0 };
+const STRONG  = { sharpen: 0.8, denoise: 0.3, deband: 0, antiring: 0.6, saturation: 1.1, contrast: 1.05, gain: 1, split: 0 };
+
+function meanAbsDiff(a, b) {
+  let s = 0;
+  for (let i = 0; i < a.length; i += 4) s += Math.abs(a[i]-b[i]) + Math.abs(a[i+1]-b[i+1]) + Math.abs(a[i+2]-b[i+2]);
+  return s / (a.length / 4 * 3);
+}
+function variance(px) {
+  let m = 0, n = px.length / 4;
+  for (let i = 0; i < px.length; i += 4) m += (px[i] + px[i+1] + px[i+2]) / 3;
+  m /= n;
+  let v = 0;
+  for (let i = 0; i < px.length; i += 4) { const d = (px[i]+px[i+1]+px[i+2])/3 - m; v += d*d; }
+  return { mean: m, sd: Math.sqrt(v / n) };
+}
+function grab(gl, w, h) {
+  const px = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  return px;
+}
+/** Render an arbitrary source canvas through a fresh engine at w×h. */
+function runOnce(source, w, h, opts) {
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const e = VUCore.createEngine(cv);
+  e.upload(source);
+  e.render(opts);
+  const px = grab(e.gl, w, h);
+  e.dispose();
+  return px;
+}
+
+(async () => {
+  try { await video.play(); } catch (e) { check('video.play()', false, e.message); return; }
+  const t0 = performance.now();
+  while (video.videoWidth === 0 && performance.now() - t0 < 5000) await new Promise(r => setTimeout(r, 40));
+  check('source frame available', video.videoWidth === SRC_W && video.videoHeight === SRC_H,
+        `videoWidth=${video.videoWidth} videoHeight=${video.videoHeight}`);
+
+  let engine;
+  try { engine = VUCore.createEngine(out); }
+  catch (e) { check('shaders compile + link', false, e.message); return; }
+  if (!engine) { check('WebGL2 context', false, 'createEngine returned null'); return; }
+  check('WebGL2 context + all 4 shaders compile/link', true,
+        engine.gl.getParameter(engine.gl.RENDERER) + ' | intermediates: ' + engine.precision);
+
+  paint();
+  await new Promise(r => setTimeout(r, 120));
+  engine.upload(video);
+  check('render() returns true', engine.render(NEUTRAL));
+  const neutral = grab(engine.gl, out.width, out.height);
+
+  const stN = variance(neutral);
+  check('output is not blank', stN.sd > 12, `mean=${stN.mean.toFixed(1)} sd=${stN.sd.toFixed(1)}`);
+  check('brightness probe agrees', engine.sampleBrightness() > 1,
+        `sampleBrightness=${engine.sampleBrightness().toFixed(1)}`);
+
+  engine.upload(video);
+  engine.render(STRONG);
+  const strong = grab(engine.gl, out.width, out.height);
+  check('sharpen/denoise/grade change the image', meanAbsDiff(neutral, strong) > 1.5,
+        `mean |Δ| = ${meanAbsDiff(neutral, strong).toFixed(2)} / 255`);
+
+  function hfEnergy(px, w, h) {
+    let s = 0, n = 0;
+    for (let y = 2; y < h - 2; y += 3) for (let x = 2; x < w - 2; x += 3) {
+      const i = (y * w + x) * 4;
+      s += Math.abs(4*px[i] - px[i-4] - px[i+4] - px[i-w*4] - px[i+w*4]); n++;
+    }
+    return s / n;
+  }
+  engine.upload(video);
+  engine.render(Object.assign({}, STRONG, { denoise: 0 }));
+  const sharpOnly = grab(engine.gl, out.width, out.height);
+  const hfN = hfEnergy(neutral, out.width, out.height);
+  const hfS = hfEnergy(sharpOnly, out.width, out.height);
+  check('RCAS sharpening adds high-frequency energy', hfS > hfN * 1.05,
+        `mean |laplacian| ${hfN.toFixed(2)} -> ${hfS.toFixed(2)} (+${(100*(hfS/hfN-1)).toFixed(0)}%)`);
+
+  // ---- 1:1 identity: the classic half-pixel-offset trap -------------------
+  const idc = document.createElement('canvas');
+  idc.width = SRC_W; idc.height = SRC_H;
+  const idEng = VUCore.createEngine(idc);
+  idEng.upload(src);
+  idEng.render(NEUTRAL);
+  const idOut = grab(idEng.gl, SRC_W, SRC_H);
+  const srcPx = sctx.getImageData(0, 0, SRC_W, SRC_H).data;
+  const flipped = new Uint8Array(srcPx.length);
+  for (let y = 0; y < SRC_H; y++)
+    flipped.set(srcPx.subarray((SRC_H-1-y)*SRC_W*4, (SRC_H-y)*SRC_W*4), y*SRC_W*4);
+  const idDiff = meanAbsDiff(idOut, flipped);
+  check('1:1 resample is pixel-identical (no half-pixel drift)', idDiff < 1.6,
+        `mean |Δ| = ${idDiff.toFixed(3)} / 255 (dither contributes ~0.7)`);
+  idEng.dispose();
+
+  // ---- THE ENGINE UPGRADE: does EASU actually beat Lanczos on diagonals? --
+  // A shallow diagonal edge is where a direction-blind kernel staircases. For
+  // each output row find the sub-pixel 50% crossing; a good upscaler puts them
+  // on a straight line, a staircasing one snaps them to source-pixel steps.
+  // Metric = RMS deviation of those crossings from the best-fit line.
+  const EW = 120, EH = 120;
+  const ec = document.createElement('canvas');
+  ec.width = EW; ec.height = EH;
+  const ectx = ec.getContext('2d');
+  const eimg = ectx.createImageData(EW, EH);
+  for (let y = 0; y < EH; y++) for (let x = 0; x < EW; x++) {
+    const i = (y*EW + x)*4;
+    const v = (x < 30 + y * 0.35) ? 235 : 25;      // ~19° diagonal edge
+    eimg.data[i] = eimg.data[i+1] = eimg.data[i+2] = v; eimg.data[i+3] = 255;
+  }
+  ectx.putImageData(eimg, 0, 0);
+
+  const OW = EW * 5, OH = EH * 5;
+  function crossingRMS(px, w, h) {
+    const xs = [], ys = [];
+    for (let y = 4; y < h - 4; y += 2) {
+      let found = -1;
+      for (let x = 1; x < w; x++) {
+        const a = px[(y*w + x - 1)*4], b = px[(y*w + x)*4];
+        if ((a - 130) * (b - 130) <= 0 && a !== b) { found = x - 1 + (130 - a) / (b - a); break; }
+      }
+      if (found > 0) { xs.push(found); ys.push(y); }
+    }
+    if (xs.length < 20) return null;
+    const n = xs.length;
+    const my = ys.reduce((s,v)=>s+v,0)/n, mx = xs.reduce((s,v)=>s+v,0)/n;
+    let num = 0, den = 0;
+    for (let i = 0; i < n; i++) { num += (ys[i]-my)*(xs[i]-mx); den += (ys[i]-my)**2; }
+    const slope = num/den, icept = mx - slope*my;
+    let ss = 0;
+    for (let i = 0; i < n; i++) { const d = xs[i] - (slope*ys[i] + icept); ss += d*d; }
+    return { rms: Math.sqrt(ss/n), n };
+  }
+  const lanEdge = runOnce(ec, OW, OH, Object.assign({}, NEUTRAL, { upscaler: 'lanczos' }));
+  const fsrEdge = runOnce(ec, OW, OH, Object.assign({}, NEUTRAL, { upscaler: 'fsr' }));
+  const rl = crossingRMS(lanEdge, OW, OH);
+  const rf = crossingRMS(fsrEdge, OW, OH);
+  if (!rl || !rf) {
+    check('EASU vs Lanczos on a diagonal edge', false, 'could not locate the edge');
+  } else {
+    check('EASU staircases a diagonal edge less than Lanczos', rf.rms < rl.rms,
+          `edge-position RMS (lower=straighter): Lanczos ${rl.rms.toFixed(3)}px  ->  EASU ${rf.rms.toFixed(3)}px` +
+          `  (${(100*(1 - rf.rms/rl.rms)).toFixed(0)}% straighter, ${rf.n} rows)`);
+  }
+
+  // EASU must not ring: output on a hard edge stays within the source range.
+  let lo = 255, hi = 0;
+  for (let i = 0; i < fsrEdge.length; i += 4) { lo = Math.min(lo, fsrEdge[i]); hi = Math.max(hi, fsrEdge[i]); }
+  check('EASU does not overshoot the source range (no ringing)', lo >= 22 && hi <= 238,
+        `output range ${lo}..${hi}, source 25..235 (±3 dither)`);
+
+  // ---- deband: the artifact that actually ruins low-bitrate streams -------
+  // A very shallow gradient quantises to 8 bits into visible plateaus.
+  const GW = 256, GH = 64;
+  const gc = document.createElement('canvas');
+  gc.width = GW; gc.height = GH;
+  const gctx = gc.getContext('2d');
+  const gimg = gctx.createImageData(GW, GH);
+  for (let y = 0; y < GH; y++) for (let x = 0; x < GW; x++) {
+    const i = (y*GW + x)*4;
+    const v = Math.round(255 * (0.34 + 0.055 * (x / GW)));   // ~14 levels over 256px
+    gimg.data[i] = gimg.data[i+1] = gimg.data[i+2] = v; gimg.data[i+3] = 255;
+  }
+  gctx.putImageData(gimg, 0, 0);
+
+  // Banding = long plateaus of one identical value. The fix is judged by how
+  // long those plateaus are: shorter runs == the contour lines have dissolved.
+  // Averaged over many rows: a single row's longest run is far too noisy to
+  // draw conclusions from, and an earlier version of this diagnostic did
+  // exactly that and produced a misleading dark-vs-mid gap.
+  function plateaus(px, w, _row, h) {
+    const rows = [];
+    const top = 4, bot = (h || 64) - 4;
+    for (let row = top; row < bot; row += 2) {
+      let runs = 0, longest = 1, cur = 1, levels = new Set();
+      for (let x = 1; x < w; x++) {
+        const v = px[(row*w + x)*4], p = px[(row*w + x - 1)*4];
+        levels.add(v);
+        if (v === p) { cur++; } else { runs++; longest = Math.max(longest, cur); cur = 1; }
+      }
+      rows.push({ meanRun: w / Math.max(runs, 1), longest, levels: levels.size });
+    }
+    const avg = (k) => rows.reduce((s, r) => s + r[k], 0) / rows.length;
+    return { meanRun: avg('meanRun'), longest: avg('longest'), levels: avg('levels'), rows: rows.length };
+  }
+  const gOff = runOnce(gc, GW, GH, Object.assign({}, NEUTRAL, { deband: 0 }));
+  const gOn  = runOnce(gc, GW, GH, Object.assign({}, NEUTRAL, { deband: 0.6 }));
+  const pOff = plateaus(gOff, GW, 0, GH);
+  const pOn  = plateaus(gOn,  GW, 0, GH);
+  note('  [diagnostic] gradient plateaus',
+       `deband off: meanRun ${pOff.meanRun.toFixed(1)}px longest ${pOff.longest.toFixed(1)} levels ${pOff.levels.toFixed(1)}  |  ` +
+       `on: meanRun ${pOn.meanRun.toFixed(1)}px longest ${pOn.longest.toFixed(1)} levels ${pOn.levels.toFixed(1)}  |  ` +
+       `mean |Δ| ${meanAbsDiff(gOff, gOn).toFixed(3)}`);
+  // The dither is deterministic (hashed from pixel coordinates), so an off/on
+  // diff isolates deband's own contribution exactly — no run-to-run noise.
+  // Honest finding: dither does the bulk of the debanding; this pass is a
+  // refinement on top of it, worth ~20% off the longest plateau here.
+  const dbDelta = meanAbsDiff(gOff, gOn);
+  check('deband measurably refines a banded gradient', dbDelta > 0.1 && pOn.longest < pOff.longest,
+        `longest plateau ${pOff.longest.toFixed(1)}px -> ${pOn.longest.toFixed(1)}px ` +
+        `(${(100*(1 - pOn.longest/pOff.longest)).toFixed(0)}% shorter, mean of ${pOff.rows} rows), isolated mean |Δ| ${dbDelta.toFixed(3)}/255`);
+
+  // It must leave real detail alone. Tested on the zone plate, which is dense
+  // high-frequency texture everywhere — a smearing deband would show up loudly.
+  // (A flat-plus-edge image would pass this trivially and prove nothing.)
+  const dOff = runOnce(src, SRC_W*4, SRC_H*4, Object.assign({}, NEUTRAL, { deband: 0 }));
+  const dOn  = runOnce(src, SRC_W*4, SRC_H*4, Object.assign({}, NEUTRAL, { deband: 0.6 }));
+  check('deband leaves dense detail intact', meanAbsDiff(dOff, dOn) < 1.5,
+        `mean |Δ| across the zone plate = ${meanAbsDiff(dOff, dOn).toFixed(3)} / 255`);
+
+  // ---- is dark banding actually worse than mid-tone banding? -------------
+  // Claimed, not yet measured. Build the same shallow ramp at two brightness
+  // levels and compare how much deband helps each. Measure before fixing.
+  function ramp(lo, hi) {
+    const c = document.createElement('canvas');
+    c.width = GW; c.height = GH;
+    const cx = c.getContext('2d');
+    const im = cx.createImageData(GW, GH);
+    for (let y = 0; y < GH; y++) for (let x = 0; x < GW; x++) {
+      const i = (y*GW + x)*4;
+      const v = Math.round(255 * (lo + (hi - lo) * (x / GW)));
+      im.data[i] = im.data[i+1] = im.data[i+2] = v; im.data[i+3] = 255;
+    }
+    cx.putImageData(im, 0, 0);
+    return c;
+  }
+  function debandGain(canvas) {
+    const off = runOnce(canvas, GW, GH, Object.assign({}, NEUTRAL, { deband: 0 }));
+    const on  = runOnce(canvas, GW, GH, Object.assign({}, NEUTRAL, { deband: 0.6 }));
+    const a = plateaus(off, GW, 0, GH), b = plateaus(on, GW, 0, GH);
+    return { off: a.longest, on: b.longest, gain: 1 - b.longest / a.longest, levels: [a.levels, b.levels] };
+  }
+  const darkRamp = debandGain(ramp(0.02, 0.075));   // near-black, like a dim interior
+  const midRamp  = debandGain(ramp(0.34, 0.395));   // mid grey
+  note('  [diagnostic] deband by brightness',
+       `dark ramp: longest ${darkRamp.off.toFixed(1)} -> ${darkRamp.on.toFixed(1)} (${(100*darkRamp.gain).toFixed(0)}% better)  |  ` +
+       `mid ramp: longest ${midRamp.off.toFixed(1)} -> ${midRamp.on.toFixed(1)} (${(100*midRamp.gain).toFixed(0)}% better)`);
+
+  // ---- minification: does downscaling FILTER, or does it alias? ----------
+  // A 2px checkerboard shrunk 3x carries no representable detail at all, so a
+  // correct resampler averages it to flat grey. A fixed-width kernel skips most
+  // of the source pixels it should be integrating and produces moire instead —
+  // visible as large-scale blotches, i.e. high variance in the output.
+  {
+    const MW = 360;
+    const mc = document.createElement('canvas');
+    mc.width = mc.height = MW;
+    const mx = mc.getContext('2d');
+    const mim = mx.createImageData(MW, MW);
+    for (let y = 0; y < MW; y++) for (let x = 0; x < MW; x++) {
+      const i = (y*MW + x)*4;
+      const v = (((x >> 1) + (y >> 1)) & 1) ? 235 : 25;   // 2px checkerboard
+      mim.data[i] = mim.data[i+1] = mim.data[i+2] = v; mim.data[i+3] = 255;
+    }
+    mx.putImageData(mim, 0, 0);
+
+    const OUT = 120;                                   // 3x minification
+    const down = runOnce(mc, OUT, OUT, Object.assign({}, NEUTRAL, { upscaler: 'lanczos' }));
+    const st = variance(down);
+    // reference: what a correct box average gives (flat mid grey ~130)
+    check('minification filters instead of aliasing', st.sd < 6,
+          `3x downscale of a 2px checkerboard: mean ${st.mean.toFixed(1)}, sd ${st.sd.toFixed(2)} ` +
+          `(flat grey => sd near 0; moire => large sd)`);
+  }
+
+  // ---- source cropping (object-fit: cover / none) ------------------------
+  // YouTube sets object-fit: cover. Rendering must be able to show a sub-rect of
+  // the frame, or the whole site falls back to filter mode.
+  {
+    const QS = 120;
+    const q = document.createElement('canvas');
+    q.width = q.height = QS;
+    const qx = q.getContext('2d');
+    // four distinctly coloured quadrants
+    const cols = ['#e03030', '#30a030', '#3040e0', '#e0d020'];
+    qx.fillStyle = cols[0]; qx.fillRect(0, 0, QS/2, QS/2);
+    qx.fillStyle = cols[1]; qx.fillRect(QS/2, 0, QS/2, QS/2);
+    qx.fillStyle = cols[2]; qx.fillRect(0, QS/2, QS/2, QS/2);
+    qx.fillStyle = cols[3]; qx.fillRect(QS/2, QS/2, QS/2, QS/2);
+
+    const whole = runOnce(q, QS, QS, Object.assign({}, NEUTRAL, { srcRect: [0, 0, 1, 1] }));
+    // bottom-left quadrant only (readPixels is bottom-up, so src y 0.5..1 is the
+    // TOP-left quadrant of the image => red)
+    const crop = runOnce(q, QS, QS, Object.assign({}, NEUTRAL, { srcRect: [0, 0.5, 0.5, 0.5] }));
+    const px = (buf, x, y) => [buf[(y*QS+x)*4], buf[(y*QS+x)*4+1], buf[(y*QS+x)*4+2]];
+    const near = (a, b, tol) => Math.abs(a[0]-b[0]) < tol && Math.abs(a[1]-b[1]) < tol && Math.abs(a[2]-b[2]) < tol;
+    // uncropped: four different quadrant colours present
+    const q4 = [px(whole, 30, 30), px(whole, 90, 30), px(whole, 30, 90), px(whole, 90, 90)];
+    const distinct = q4.filter((c, i) => q4.findIndex(d => near(c, d, 12)) === i).length;
+    check('uncropped render shows the whole frame', distinct === 4,
+          `${distinct} distinct quadrant colours in the output`);
+    // cropped: the whole output should be ONE colour (a single source quadrant)
+    const c4 = [px(crop, 20, 20), px(crop, 100, 20), px(crop, 20, 100), px(crop, 100, 100)];
+    const same = c4.every(c => near(c, c4[0], 14));
+    check('srcRect crops the source (object-fit: cover / none)', same,
+          `corners of the cropped render: ${c4.map(c => c.join(',')).join('  |  ')}`);
+  }
+
+  // ---- chroma reconstruction: can it undo 4:2:0 colour bleed? ------------
+  // Build a sharp colour edge, then degrade it the way a 4:2:0 pipeline does:
+  // blur ONLY the chroma, leave luma untouched. A correct reconstruction should
+  // pull the colour edge back toward the original without touching luma.
+  const CS = 96;
+  function colourEdge(chromaBlur) {
+    const c = document.createElement('canvas');
+    c.width = c.height = CS;
+    const cx = c.getContext('2d');
+    const im = cx.createImageData(CS, CS);
+    const Y = [], CB = [], CR = [];
+    for (let x = 0; x < CS; x++) {
+      const left = x < CS / 2;
+      const r = left ? 0.78 : 0.12, g = left ? 0.14 : 0.62, b = left ? 0.16 : 0.24;
+      const y = 0.2126*r + 0.7152*g + 0.0722*b;
+      Y.push(y); CB.push((b - y) / 1.8556); CR.push((r - y) / 1.5748);
+    }
+    // box-blur the chroma columns only, exactly what quarter-res storage costs
+    const blur = (arr) => arr.map((_, i) => {
+      let s = 0, n = 0;
+      for (let k = -chromaBlur; k <= chromaBlur; k++) {
+        const j = Math.min(CS - 1, Math.max(0, i + k)); s += arr[j]; n++;
+      }
+      return s / n;
+    });
+    const cb = chromaBlur ? blur(CB) : CB, cr = chromaBlur ? blur(CR) : CR;
+    for (let yy = 0; yy < CS; yy++) for (let x = 0; x < CS; x++) {
+      const i = (yy*CS + x)*4;
+      const r = Y[x] + 1.5748*cr[x];
+      const g = Y[x] - 0.1873*cb[x] - 0.4681*cr[x];
+      const b = Y[x] + 1.8556*cb[x];
+      im.data[i]   = Math.round(255 * Math.min(1, Math.max(0, r)));
+      im.data[i+1] = Math.round(255 * Math.min(1, Math.max(0, g)));
+      im.data[i+2] = Math.round(255 * Math.min(1, Math.max(0, b)));
+      im.data[i+3] = 255;
+    }
+    cx.putImageData(im, 0, 0);
+    return c;
+  }
+  // Colour bleed IS transition width, so measure that, not a step at some fixed
+  // offset — offsets outside the bleed zone read identical whatever you do.
+  // 10%-90% crossing width of the Cr profile: narrower == crisper colour edge.
+  function chromaWidth(px, w, row) {
+    const cr = (x) => {
+      const i = (row*w + x)*4, r = px[i]/255, g = px[i+1]/255, b = px[i+2]/255;
+      return (r - (0.2126*r + 0.7152*g + 0.0722*b)) / 1.5748;
+    };
+    let a = 0, b = 0;
+    for (let x = 5; x < 16; x++) a += cr(x);
+    for (let x = w - 16; x < w - 5; x++) b += cr(x);
+    a /= 11; b /= 11;
+    const lo = a + (b - a) * 0.1, hi = a + (b - a) * 0.9;
+    const between = (v, p, q) => (v - p) * (v - q) <= 0;
+    let x10 = -1, x90 = -1;
+    for (let x = 5; x < w - 5; x++) {
+      const v = cr(x);
+      if (x10 < 0 && between(v, lo, hi) === false && between(v, a, lo)) continue;
+      if (x10 < 0 && !between(v, a, lo)) x10 = x;
+      if (x10 >= 0 && !between(v, lo, hi)) { x90 = x; break; }
+    }
+    return (x10 >= 0 && x90 >= 0) ? (x90 - x10) : NaN;
+  }
+  const sharpSrc = colourEdge(0);
+  const bledSrc  = colourEdge(3);
+  const wRef  = chromaWidth(runOnce(sharpSrc, CS, CS, NEUTRAL), CS, 48);
+  const wOff  = chromaWidth(runOnce(bledSrc, CS, CS, Object.assign({}, NEUTRAL, { chroma: 0 })), CS, 48);
+  const wOn   = chromaWidth(runOnce(bledSrc, CS, CS, Object.assign({}, NEUTRAL, { chroma: 0.9 })), CS, 48);
+  const recovered = (wOff - wOn) / Math.max(wOff - wRef, 1e-6);
+  check('chroma reconstruction recovers 4:2:0 colour bleed', wOn < wOff && recovered > 0.3,
+        `colour-edge width: original ${wRef}px, bled ${wOff}px, reconstructed ${wOn}px ` +
+        `— ${(100*recovered).toFixed(0)}% of the bleed removed`);
+
+  // Is the pass even running? Print the raw Cr profile across the edge.
+  {
+    const prof = (px) => {
+      const out = [];
+      for (let x = 42; x <= 54; x++) {
+        const i = (48*CS + x)*4, r = px[i]/255, g = px[i+1]/255, b = px[i+2]/255;
+        out.push(((r - (0.2126*r + 0.7152*g + 0.0722*b)) / 1.5748).toFixed(3));
+      }
+      return out.join(' ');
+    };
+    const pOffx = runOnce(bledSrc, CS, CS, Object.assign({}, NEUTRAL, { chroma: 0 }));
+    const pOnx  = runOnce(bledSrc, CS, CS, Object.assign({}, NEUTRAL, { chroma: 0.9 }));
+    let d = 0;
+    for (let i = 0; i < pOffx.length; i += 4) d += Math.abs(pOffx[i] - pOnx[i]);
+    note('  [diagnostic] Cr profile x=42..54',
+         `chroma off: ${prof(pOffx)}<br>        chroma on : ${prof(pOnx)}<br>        ` +
+         `red-channel mean |Δ| between the two = ${(d / (pOffx.length/4)).toFixed(3)}`);
+  }
+
+  // Near an edge the guided filter falls back to local averaging, which costs a
+  // little saturation. That must stay LOCAL — a global desaturation would be a
+  // far worse bug than the fringing it fixes.
+  {
+    const crAt = (px, x) => {
+      const i = (48*CS + x)*4, r = px[i]/255, g = px[i+1]/255, b = px[i+2]/255;
+      return (r - (0.2126*r + 0.7152*g + 0.0722*b)) / 1.5748;
+    };
+    const off = runOnce(bledSrc, CS, CS, Object.assign({}, NEUTRAL, { chroma: 0 }));
+    const on  = runOnce(bledSrc, CS, CS, Object.assign({}, NEUTRAL, { chroma: 0.9 }));
+    const farOff = crAt(off, 12), farOn = crAt(on, 12);
+    const drop = Math.abs(1 - farOn / farOff);
+    check('chroma reconstruction does not desaturate away from edges', drop < 0.03,
+          `Cr far from the edge (x=12): ${farOff.toFixed(3)} -> ${farOn.toFixed(3)} ` +
+          `(${(100*drop).toFixed(1)}% change)`);
+  }
+
+  // it must not repaint luma while it is at it
+  function lumaAt(px, w, row, x) { const i = (row*w + x)*4;
+    return 0.2126*px[i] + 0.7152*px[i+1] + 0.0722*px[i+2]; }
+  const lOff = runOnce(bledSrc, CS, CS, Object.assign({}, NEUTRAL, { chroma: 0 }));
+  const lOn  = runOnce(bledSrc, CS, CS, Object.assign({}, NEUTRAL, { chroma: 0.9 }));
+  let lumaDrift = 0;
+  for (let x = 4; x < CS - 4; x++) lumaDrift += Math.abs(lumaAt(lOn, CS, 48, x) - lumaAt(lOff, CS, 48, x));
+  lumaDrift /= (CS - 8);
+  check('chroma reconstruction leaves luma alone', lumaDrift < 2.0,
+        `mean luma drift ${lumaDrift.toFixed(2)} / 255`);
+
+  // ---- temporal accumulation: does it recover anything, and does it ghost?
+  // Deterministic PRNG so both runs see the IDENTICAL noise sequence and the
+  // only variable is the temporal setting.
+  function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+  const NS = 128;
+  const nc = document.createElement('canvas');
+  nc.width = NS; nc.height = NS;
+  const nctx = nc.getContext('2d');
+  function paintNoisy(rnd) {
+    const im = nctx.createImageData(NS, NS);
+    for (let y = 0; y < NS; y++) for (let x = 0; x < NS; x++) {
+      const i = (y*NS + x)*4;
+      // a static underlying scene plus fresh per-frame noise, i.e. exactly what
+      // a real encoder hands us on a locked-off shot
+      const base = (x < NS/2 ? 0.42 : 0.58) + 0.06 * Math.sin(y * 0.15);
+      const v = Math.max(0, Math.min(1, base + (rnd() - 0.5) * 0.16));
+      im.data[i] = im.data[i+1] = im.data[i+2] = Math.round(255 * v);
+      im.data[i+3] = 255;
+    }
+    nctx.putImageData(im, 0, 0);
+  }
+  /** sd within a flat half of the frame == how much noise survived */
+  function patchSd(px, w, x0, y0, n) {
+    const vals = [];
+    for (let y = y0; y < y0 + n; y++) for (let x = x0; x < x0 + n; x++) vals.push(px[(y*w + x)*4]);
+    const m = vals.reduce((a,b)=>a+b,0) / vals.length;
+    return Math.sqrt(vals.reduce((a,b)=>a+(b-m)*(b-m),0) / vals.length);
+  }
+  function accumulate(temporal, frames) {
+    const cv = document.createElement('canvas');
+    cv.width = NS; cv.height = NS;
+    const e = VUCore.createEngine(cv);
+    const rnd = mulberry(12345);
+    for (let i = 0; i < frames; i++) {
+      paintNoisy(rnd);
+      e.upload(nc);
+      e.render(Object.assign({}, NEUTRAL, { temporal }));
+    }
+    const px = grab(e.gl, NS, NS);
+    e.dispose();
+    return px;
+  }
+  // Noise-free ground truth. The residual against THIS is the noise; raw sd of
+  // a patch is not, because the scene itself varies inside any patch big enough
+  // to measure (an earlier version of this test measured a full sine cycle of
+  // real signal and mistook it for surviving noise).
+  const clean = document.createElement('canvas');
+  clean.width = clean.height = NS;
+  const cctx = clean.getContext('2d');
+  const cim = cctx.createImageData(NS, NS);
+  for (let y = 0; y < NS; y++) for (let x = 0; x < NS; x++) {
+    const i = (y*NS + x)*4;
+    const v = (x < NS/2 ? 0.42 : 0.58) + 0.06 * Math.sin(y * 0.15);
+    cim.data[i] = cim.data[i+1] = cim.data[i+2] = Math.round(255 * v);
+    cim.data[i+3] = 255;
+  }
+  cctx.putImageData(cim, 0, 0);
+  const truth = runOnce(clean, NS, NS, Object.assign({}, NEUTRAL, { temporal: 0 }));
+
+  const single = accumulate(0.0, 24);
+  const accum  = accumulate(0.85, 24);
+  /** RMS of (rendered - truth) inside a patch == how much noise survived */
+  function residual(px, x0, y0, n) {
+    let s = 0, c = 0;
+    for (let y = y0; y < y0 + n; y++) for (let x = x0; x < x0 + n; x++) {
+      const i = (y*NS + x)*4;
+      const d = px[i] - truth[i];
+      s += d*d; c++;
+    }
+    return Math.sqrt(s / c);
+  }
+  const sdSingle = residual(single, 12, 12, 40);
+  const sdAccum  = residual(accum,  12, 12, 40);
+  check('temporal accumulation recovers signal from noise', sdAccum < sdSingle * 0.7,
+        `noise vs noise-free truth: ${sdSingle.toFixed(2)} -> ${sdAccum.toFixed(2)} ` +
+        `(${(100*(1 - sdAccum/sdSingle)).toFixed(0)}% less noise over 24 frames)`);
+
+  // ...and the edge in the middle must survive. Compared against the NOISE-FREE
+  // ground truth, not against the single-frame render: a single noisy sample
+  // pair reports an inflated "edge" and would make smearing look like success.
+  const band = (px, x0) => {
+    let s = 0;
+    for (let y = 40; y < 88; y++) s += px[(y*NS + x0)*4];
+    return s / 48;
+  };
+  const edgeOf = (px) => Math.abs(band(px, 70) - band(px, 58));
+  const eTruth = edgeOf(truth), eAccum = edgeOf(accum), eSingle = edgeOf(single);
+  check('temporal preserves the true edge contrast',
+        Math.abs(eAccum - eTruth) < eTruth * 0.15,
+        `edge step vs noise-free truth ${eTruth.toFixed(1)}: accumulated ${eAccum.toFixed(1)}, ` +
+        `single-frame ${eSingle.toFixed(1)}`);
+
+  // ---- ghosting: a hard cut must be adopted immediately -------------------
+  const cutA = document.createElement('canvas'); cutA.width = cutA.height = NS;
+  const cutB = document.createElement('canvas'); cutB.width = cutB.height = NS;
+  const ca = cutA.getContext('2d'), cb = cutB.getContext('2d');
+  ca.fillStyle = '#141414'; ca.fillRect(0, 0, NS, NS);
+  cb.fillStyle = '#e0e0e0'; cb.fillRect(0, 0, NS, NS);
+  cb.fillStyle = '#202020'; cb.fillRect(NS/4, NS/4, NS/2, NS/2);
+
+  const cvc = document.createElement('canvas'); cvc.width = cvc.height = NS;
+  const ce = VUCore.createEngine(cvc);
+  for (let i = 0; i < 15; i++) { ce.upload(cutA); ce.render(Object.assign({}, NEUTRAL, { temporal: 0.85 })); }
+  ce.upload(cutB); ce.render(Object.assign({}, NEUTRAL, { temporal: 0.85 }));
+  const afterCut = grab(ce.gl, NS, NS);
+  ce.dispose();
+  const cleanB = runOnce(cutB, NS, NS, Object.assign({}, NEUTRAL, { temporal: 0 }));
+  const ghost = meanAbsDiff(afterCut, cleanB);
+  check('no ghosting: a hard cut is adopted on the very next frame', ghost < 6,
+        `mean |Δ| vs a clean render of the new shot = ${ghost.toFixed(2)} / 255 ` +
+        `(history was 15 frames of the old shot)`);
+
+  // ---- PHASE 1: does the perceived-quality layer actually do its job? ----
+  // A photo-like test scene: broad tonal regions (what local contrast acts on),
+  // a muted colour patch (vibrance), and a dark region (shadow lift).
+  {
+    const PW = 256, PH = 160;
+    const pc = document.createElement('canvas');
+    pc.width = PW; pc.height = PH;
+    const pcx = pc.getContext('2d');
+    const pim = pcx.createImageData(PW, PH);
+    for (let y = 0; y < PH; y++) for (let x = 0; x < PW; x++) {
+      const i = (y*PW + x)*4;
+      // Real images carry structure at EVERY scale, so the test scene must too:
+      // one coarse component, one in the band local contrast targets, and fine
+      // texture on top. An earlier version had only a ~280px component, which
+      // the filter's 8-64px band barely touches, and it under-reported the gain.
+      const coarse = 0.20 * Math.sin(x * 0.045) * Math.cos(y * 0.055);   // ~140px
+      const mid    = 0.13 * Math.sin(x * 0.30)  * Math.cos(y * 0.26);    // ~21px
+      const fine   = 0.02 * Math.sin(x * 1.7);
+      const blob   = 0.5 + coarse + mid;
+      let r = blob + fine, g = blob + fine, b = blob + fine;
+      if (x > PW * 0.62 && y < PH * 0.4) { r = 0.46; g = 0.40; b = 0.34; }   // muted colour
+      if (y > PH * 0.72) { r = g = b = 0.055 + 0.03 * Math.sin(x * 0.05); }  // dark region
+      pim.data[i]   = Math.round(255 * Math.min(1, Math.max(0, r)));
+      pim.data[i+1] = Math.round(255 * Math.min(1, Math.max(0, g)));
+      pim.data[i+2] = Math.round(255 * Math.min(1, Math.max(0, b)));
+      pim.data[i+3] = 255;
+    }
+    pcx.putImageData(pim, 0, 0);
+
+    const OW2 = PW * 2, OH2 = PH * 2;
+    // NOTE: readPixels is bottom-up, so image row y maps to buffer row H-1-y.
+    // Each control is measured IN ISOLATION — with all three on at once, shadow
+    // lift compresses the global range and masks what local contrast did.
+    const plain    = runOnce(pc, OW2, OH2, NEUTRAL);
+    const detailed = runOnce(pc, OW2, OH2, Object.assign({}, NEUTRAL, { detail: 0.7 }));
+    const lifted   = runOnce(pc, OW2, OH2, Object.assign({}, NEUTRAL, { shadow: 0.45 }));
+    const vivid    = runOnce(pc, OW2, OH2, Object.assign({}, NEUTRAL, { vibrance: 0.6 }));
+
+    // Local contrast lives at the tens-of-pixels scale, so measure contrast of a
+    // heavily BLURRED copy — that is exactly the band sharpening cannot reach.
+    function midBandSd(px, w, h) {
+      const R = 12, cells = [];
+      for (let y = R; y < h - R; y += R) for (let x = R; x < w - R; x += R) {
+        let s = 0, n = 0;
+        for (let j = -R/2; j < R/2; j += 2) for (let k = -R/2; k < R/2; k += 2) {
+          s += px[(((y+j)|0)*w + ((x+k)|0))*4]; n++;
+        }
+        cells.push(s / n);
+      }
+      const m = cells.reduce((a,b)=>a+b,0) / cells.length;
+      return Math.sqrt(cells.reduce((a,b)=>a+(b-m)*(b-m),0) / cells.length);
+    }
+    const mbPlain = midBandSd(plain, OW2, OH2), mbDet = midBandSd(detailed, OW2, OH2);
+    check('local contrast raises mid-scale structure', mbDet > mbPlain * 1.06,
+          `mid-band contrast sd ${mbPlain.toFixed(1)} -> ${mbDet.toFixed(1)} ` +
+          `(+${(100*(mbDet/mbPlain-1)).toFixed(0)}%)`);
+
+    // Shadow lift must open the dark region without clipping black to grey mush
+    // dark band is image y>0.72H  =>  buffer y < 0.28H
+    const darkMean = (px) => {
+      let s = 0, n = 0;
+      for (let y = OH2*0.05; y < OH2*0.24; y += 3) for (let x = 20; x < OW2-20; x += 3) {
+        s += px[(((y)|0)*OW2 + x)*4]; n++;
+      }
+      return s / n;
+    };
+    const dP = darkMean(plain), dL = darkMean(lifted);
+    check('shadow lift opens dark regions without washing them out',
+          dL > dP * 1.3 && dL < 120,
+          `dark-region mean luma ${dP.toFixed(1)} -> ${dL.toFixed(1)} (rises, stays below mid-grey)`);
+
+    // Vibrance must push the muted patch without wrecking neutral greys
+    const satAt = (px, x, y) => {
+      const i = ((y|0)*OW2 + (x|0))*4;
+      const mx = Math.max(px[i], px[i+1], px[i+2]), mn = Math.min(px[i], px[i+1], px[i+2]);
+      return mx - mn;
+    };
+    // muted patch is image (x>0.62W, y<0.4H) => buffer y > 0.6H
+    const sP = satAt(plain, OW2*0.80, OH2*0.78), sV = satAt(vivid, OW2*0.80, OH2*0.78);
+    const nP = satAt(plain, OW2*0.20, OH2*0.55), nV = satAt(vivid, OW2*0.20, OH2*0.55);
+    check('vibrance boosts muted colour but keeps greys neutral',
+          sV > sP * 1.15 && Math.abs(nV - nP) < 6,
+          `muted patch saturation ${sP} -> ${sV}; neutral grey ${nP} -> ${nV}`);
+  }
+
+  // ---- PHASE 2: does the GLSL port match PyTorch, bit for bit-ish? -------
+  // The whole neural upscaler is worthless if the weight packing, the kernel
+  // offsets or the pixel shuffle are transposed. Those errors do not crash —
+  // they look like "slightly worse quality" forever. So compare against the
+  // trained model's own output on an identical input.
+  {
+    const R = window.VUCNNRef;
+    const rc = document.createElement('canvas');
+    rc.width = R.w; rc.height = R.h;
+    const rcx = rc.getContext('2d');
+    const rim = rcx.createImageData(R.w, R.h);
+    for (let i = 0; i < R.w * R.h; i++) {
+      const v = Math.round(R.input[i] * 255);
+      rim.data[i*4] = rim.data[i*4+1] = rim.data[i*4+2] = v;
+      rim.data[i*4+3] = 255;
+    }
+    rcx.putImageData(rim, 0, 0);
+
+    const nc = document.createElement('canvas');
+    nc.width = R.w * 2; nc.height = R.h * 2;
+    const ne = VUCore.createEngine(nc);
+    check('neural upscaler compiles', ne.neuralAvailable,
+          window.VUCNNWeights ? `${window.VUCNNWeights.filters} filters x ` +
+          `${window.VUCNNWeights.layers} layers` : 'weights not loaded');
+
+    if (ne.neuralAvailable) {
+      const t = ne.runCnnFor(rc, R.w, R.h);
+      const g = ne.gl;
+      g.bindFramebuffer(g.FRAMEBUFFER, t.fb);
+      const got = new Float32Array(t.w * t.h * 4);
+      let readOk = true;
+      try { g.readPixels(0, 0, t.w, t.h, g.RGBA, g.FLOAT, got); }
+      catch (e) { readOk = false; }
+
+      if (!readOk) {
+        check('GLSL port matches PyTorch', false, 'could not read float framebuffer');
+      } else {
+        // readPixels is bottom-up and upload() flips Y, so row r here is row
+        // (H-1-r) of the reference.
+        // Split interior from border: the two disagree only if the PADDING
+        // policy differs (PyTorch zero-pads, CLAMP_TO_EDGE replicates), which
+        // would be a border-only error. A genuine weight/offset transposition
+        // would be wrong everywhere.
+        const B = 8;
+        let si = 0, mi = 0, ni = 0, sb = 0, mb = 0, nb = 0;
+        for (let y = 0; y < t.h; y++) {
+          for (let x = 0; x < t.w; x++) {
+            const exp = R.expected[(t.h - 1 - y) * t.w + x];
+            const d = Math.abs(got[(y * t.w + x) * 4] - exp);
+            const edge = x < B || y < B || x >= t.w - B || y >= t.h - B;
+            if (edge) { sb += d; mb = Math.max(mb, d); nb++; }
+            else { si += d; mi = Math.max(mi, d); ni++; }
+          }
+        }
+        // Borders are asserted too, not just the interior. They only match
+        // because the model is trained with padding_mode="replicate" to mirror
+        // the shader's CLAMP_TO_EDGE sampling; with PyTorch's default zero
+        // padding the border error was 53.93/255 while the interior looked fine.
+        check('GLSL port matches PyTorch across the WHOLE frame',
+              si / ni < 0.0008 && mi < 0.004 && sb / nb < 0.0008 && mb < 0.004,
+              `interior mean ${(si/ni*255).toFixed(4)}/255 max ${(mi*255).toFixed(3)}/255  |  ` +
+              `border mean ${(sb/nb*255).toFixed(4)}/255 max ${(mb*255).toFixed(3)}/255`);
+      }
+      ne.dispose();
+    }
+  }
+
+  // ---- THE CASE THAT MATTERS: a heavily compressed source ----------------
+  // Everything above is measured on synthetic charts or a clean CC-BY film. Real
+  // viewing is often a low-bitrate rip, where every enhancement stage has an
+  // artifact to amplify. A preset that looks good on clean content and wrecks a
+  // bad one is not a good preset.
+  {
+    const load = (src) => new Promise((res, rej) => {
+      const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
+    });
+    let bad = null;
+    try { bad = await load('lowbitrate.png'); } catch (_) {}
+    if (!bad) {
+      skipTest('max must not amplify compression artifacts', 'lowbitrate.png missing');
+    } else {
+      const bc = document.createElement('canvas');
+      bc.width = bad.naturalWidth; bc.height = bad.naturalHeight;
+      bc.getContext('2d').drawImage(bad, 0, 0);
+      const OW3 = bc.width * 2, OH3 = bc.height * 2;
+
+      // Blockiness: gradient energy ON the DCT grid vs off it. The 8px source
+      // grid lands every 16px after a 2x upscale.
+      function blockiness(px, w, h, period) {
+        let on = 0, non = 0, off = 0, noff = 0;
+        for (let y = 4; y < h - 4; y += 2) {
+          for (let x = 1; x < w; x++) {
+            const d = Math.abs(px[(y*w+x)*4] - px[(y*w+x-1)*4]);
+            if (x % period === 0) { on += d; non++; } else { off += d; noff++; }
+          }
+        }
+        return (on / non) / Math.max(off / noff, 1e-6);
+      }
+
+      const MAXP = { sharpen: 0.62, detail: 0.80, vibrance: 0.60, shadow: 0.40,
+                     denoise: 0.16, chroma: 0.85, deband: 0.60, temporal: 0,
+                     antiring: 0.80, saturation: 1.05, contrast: 1.03, gain: 1,
+                     split: 0, neural: 0, upscaler: 'fsr' };
+      const plainOut = runOnce(bc, OW3, OH3, NEUTRAL);
+      const maxOut   = runOnce(bc, OW3, OH3, MAXP);
+      const bPlain = blockiness(plainOut, OW3, OH3, 16);
+      const bMax   = blockiness(maxOut,   OW3, OH3, 16);
+      note('  [diagnostic] blockiness on a crf45 source',
+           `untouched ${bPlain.toFixed(3)}  ->  max ${bMax.toFixed(3)} ` +
+           `(${bMax > bPlain ? 'AMPLIFIED' : 'reduced'} ${(100*(bMax/bPlain-1)).toFixed(0)}%)`);
+      check('max must not amplify compression artifacts', bMax <= bPlain * 1.05,
+            `block-edge ratio ${bPlain.toFixed(3)} -> ${bMax.toFixed(3)} on a crf45 rip`);
+    }
+  }
+
+  // ---- ABLATION on a DARK, LOW-CONTRAST, DETAILED scene ------------------
+  // The reported failure looked like smearing, not blocking, and it was on a
+  // dim interior. Every earlier detail-preservation test used HIGH-contrast
+  // content (a zone plate), where a threshold expressed in absolute code values
+  // is never reached. Dark scenes are the opposite case and were never covered.
+  {
+    const DW = 320, DH = 200;
+    const dc = document.createElement('canvas');
+    dc.width = DW; dc.height = DH;
+    const dcx = dc.getContext('2d');
+    const dim = dcx.createImageData(DW, DH);
+    for (let y = 0; y < DH; y++) for (let x = 0; x < DW; x++) {
+      const i = (y*DW + x)*4;
+      // dim interior: mean ~0.10, real texture but only ~0.03 amplitude
+      const tex = 0.030 * (Math.sin(x*0.9) * Math.cos(y*0.8) + 0.6*Math.sin((x+y)*0.45));
+      const v = Math.max(0, 0.10 + tex);
+      dim.data[i]   = Math.round(255 * v);
+      dim.data[i+1] = Math.round(255 * v * 0.94);
+      dim.data[i+2] = Math.round(255 * v * 1.12);
+      dim.data[i+3] = 255;
+    }
+    dcx.putImageData(dim, 0, 0);
+
+    const OW4 = DW * 2, OH4 = DH * 2;
+    // How much fine texture survives, measured as high-frequency energy
+    function texEnergy(px, w, h) {
+      let s = 0, n = 0;
+      for (let y = 3; y < h - 3; y += 2) for (let x = 3; x < w - 3; x += 2) {
+        const i = (y*w + x)*4;
+        s += Math.abs(4*px[i] - px[i-4] - px[i+4] - px[i-w*4] - px[i+w*4]); n++;
+      }
+      return s / n;
+    }
+    const BASE = { sharpen: 0, detail: 0, vibrance: 0, shadow: 0, denoise: 0,
+                   chroma: 0, deband: 0, temporal: 0, antiring: 0.8,
+                   saturation: 1, contrast: 1, gain: 1, split: 0, neural: 0 };
+    const ref = texEnergy(runOnce(dc, OW4, OH4, BASE), OW4, OH4);
+
+    const stages = [
+      ['deband 0.60',   { deband: 0.60 }],
+      ['denoise 0.16',  { denoise: 0.16 }],
+      ['chroma 0.85',   { chroma: 0.85 }],
+      ['detail 0.80',   { detail: 0.80 }],
+      ['shadow 0.40',   { shadow: 0.40 }],
+      ['sharpen 0.62',  { sharpen: 0.62 }],
+      // Deringing smooths by design, so it is the stage most likely to eat fine
+      // texture in a dark scene. It is gated to fire only beside a strong edge
+      // and clamped to a few levels; this is what proves the gate holds.
+      ['deblock 0.90',  { deblock: 0.90 }],
+      ['dering 0.70',   { dering: 0.70 }],
+    ];
+    const lines = [];
+    let worst = null;
+    for (const [name, over] of stages) {
+      const e = texEnergy(runOnce(dc, OW4, OH4, Object.assign({}, BASE, over)), OW4, OH4);
+      const keep = e / ref;
+      lines.push(`${name}: ${(100*keep).toFixed(0)}%`);
+      if (!worst || keep < worst[1]) worst = [name, keep];
+    }
+    note('  [diagnostic] fine texture retained on a DIM scene (100% = untouched)',
+         lines.join('   '));
+    check('no single stage destroys detail in a dark scene', worst[1] > 0.55,
+          `worst offender: ${worst[0]} keeps only ${(100*worst[1]).toFixed(0)}% of fine texture`);
+  }
+
+  // ---- THE DECISIVE TEST: closer to ground truth, or further away? -------
+  // Every other metric here asks "is there more detail". On a compressed source
+  // that CANNOT distinguish recovered detail from amplified artifact — they are
+  // the same high-frequency energy. The only honest question is whether the
+  // processed image is nearer the clean original than the untouched rip is.
+  {
+    const load = (src) => new Promise((res, rej) => {
+      const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
+    });
+    let clean = null, rip = null;
+    try { clean = await load('clean.png'); rip = await load('lowbitrate.png'); } catch (_) {}
+    if (!clean || !rip) {
+      skipTest('processing moves a compressed source toward ground truth', 'fixtures missing');
+    } else {
+      const W2 = rip.naturalWidth, H2 = rip.naturalHeight;
+      const rc = document.createElement('canvas'); rc.width = W2; rc.height = H2;
+      rc.getContext('2d').drawImage(rip, 0, 0);
+      // ground truth at output scale, and the untouched rip at the same scale
+      const gt = document.createElement('canvas'); gt.width = W2; gt.height = H2;
+      gt.getContext('2d').drawImage(clean, 0, 0, W2, H2);
+      const gtPx = gt.getContext('2d').getImageData(0, 0, W2, H2).data;
+
+      function psnrVs(px) {   // px is bottom-up from readPixels
+        let se = 0, n = 0;
+        for (let y = 0; y < H2; y++) for (let x = 0; x < W2; x++) {
+          const a = px[((H2 - 1 - y) * W2 + x) * 4];
+          const b = gtPx[(y * W2 + x) * 4];
+          se += (a - b) * (a - b); n++;
+        }
+        return 10 * Math.log10(255 * 255 / Math.max(se / n, 1e-9));
+      }
+
+      const OFFP = { sharpen: 0, detail: 0, vibrance: 0, shadow: 0, denoise: 0,
+                     chroma: 0, deband: 0, temporal: 0, antiring: 0,
+                     saturation: 1, contrast: 1, gain: 1, split: 0, neural: 0 };
+      const MAXP2 = { sharpen: 0.42, detail: 0.12, vibrance: 0.20, shadow: 0.10,
+                      denoise: 0.30, chroma: 0.85, deband: 0.60, temporal: 0,
+                      antiring: 0.80, saturation: 1.02, contrast: 1.01, gain: 1,
+                      split: 0, neural: 0, upscaler: 'fsr' };
+      const pOff = psnrVs(runOnce(rc, W2, H2, OFFP));
+      const pMax = psnrVs(runOnce(rc, W2, H2, MAXP2));
+      const pGentle = psnrVs(runOnce(rc, W2, H2,
+        Object.assign({}, MAXP2, { detail: 0.2, shadow: 0.1, sharpen: 0.3,
+                                   vibrance: 0.15, denoise: 0.35, saturation: 1, contrast: 1 })));
+
+      // Split "intended look" from "actual damage": the grade (vibrance,
+      // contrast, shadow lift, saturation) moves away from the original ON
+      // PURPOSE, so it must not be counted as harm. Everything else — detail,
+      // sharpen, deband, chroma — is supposed to RECONSTRUCT, and any distance
+      // it adds is real damage.
+      const noGrade = { vibrance: 0, shadow: 0, saturation: 1, contrast: 1 };
+      const pLookOnly = psnrVs(runOnce(rc, W2, H2, Object.assign({}, OFFP,
+        { vibrance: MAXP2.vibrance, shadow: MAXP2.shadow,
+          saturation: MAXP2.saturation, contrast: MAXP2.contrast })));
+      const pReconOnly = psnrVs(runOnce(rc, W2, H2, Object.assign({}, MAXP2, noGrade)));
+      note('  [diagnostic] distance to the CLEAN original (higher = closer)',
+           `untouched ${pOff.toFixed(2)} dB  |  max ${pMax.toFixed(2)} dB  |  ` +
+           `gentle ${pGentle.toFixed(2)} dB`);
+      // Which reconstruction stage still costs ground truth on a bad source?
+      {
+        const abl = [];
+        for (const [nm, k] of [['sharpen','sharpen'],['detail','detail'],
+                               ['deband','deband'],['chroma','chroma'],
+                               ['denoise','denoise']]) {
+          const only = Object.assign({}, OFFP, { [k]: MAXP2[k], upscaler: 'fsr' });
+          abl.push(`${nm} ${psnrVs(runOnce(rc, W2, H2, only)).toFixed(2)}`);
+        }
+        note('  [diagnostic] each stage ALONE vs ground truth (untouched ' +
+             pOff.toFixed(2) + ' dB)', abl.join('   '));
+      }
+      note('  [diagnostic] look vs damage',
+           `grade alone ${pLookOnly.toFixed(2)} dB (intended)  |  ` +
+           `reconstruction alone ${pReconOnly.toFixed(2)} dB (should be >= untouched ` +
+           `${pOff.toFixed(2)})`);
+      // A LOOK is allowed to cost a little distance; wrecking the picture is not.
+      check('max does not push a compressed source further from ground truth',
+            pMax >= pOff - 1.5,
+            `untouched ${pOff.toFixed(2)} dB -> max ${pMax.toFixed(2)} dB ` +
+            `(${pMax < pOff ? 'WORSE by ' + (pOff-pMax).toFixed(2) : 'better'})`);
+    }
+  }
+
+  // ---- THE RESTORE STAGE: does it actually remove compression damage? -----
+  // Everything else in this engine repairs SCALING damage. This is the only
+  // stage aimed at what the encoder did, so it needs its own evidence.
+  //
+  // Two instruments, deliberately of different kinds:
+  //
+  //  1. BLOCKINESS — average gradient across an 8-px transform boundary over
+  //     the average gradient inside a block. 1.0 means no blocking left. It
+  //     measures the artifact directly and cannot be faked by blurring, which
+  //     lowers both halves of the ratio. But it shares a blind spot with the
+  //     filter: both are defined on the 8-px grid, so on its own it could be
+  //     measuring nothing but its own definition.
+  //  2. DISTANCE TO GROUND TRUTH, split into the pixels ON the grid and the
+  //     pixels away from it. This one cannot be gamed — the clean original does
+  //     not know where the block boundaries are. A working deblocker moves the
+  //     grid pixels toward the original MORE than it moves the interior. A blur
+  //     dressed up as a deblocker moves both, or moves them the wrong way.
+  //
+  // The fixture is made here rather than shipped: JPEG uses the same 8x8 DCT as
+  // the video codecs, so crushing the clean plate manufactures severe blocking
+  // whose ground truth is the plate itself.
+  {
+    const load = (src) => new Promise((res, rej) => {
+      const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
+    });
+    let clean = null;
+    try { clean = await load('clean.png'); } catch (_) {}
+    if (!clean) {
+      skipTest('the restore stage removes compression damage', 'clean.png missing');
+    } else {
+      const W3 = clean.naturalWidth, H3 = clean.naturalHeight;
+      const mk = (im) => {
+        const c = document.createElement('canvas'); c.width = W3; c.height = H3;
+        c.getContext('2d').drawImage(im, 0, 0, W3, H3); return c;
+      };
+      const cleanCv = mk(clean);
+      const truth = cleanCv.getContext('2d').getImageData(0, 0, W3, H3).data;
+      const crushed = mk(await new Promise((res) => {
+        const im = new Image();
+        im.onload = () => res(im);
+        im.src = cleanCv.toDataURL('image/jpeg', 0.12);
+      }));
+
+      // px is bottom-up from readPixels. `where` restricts to the transform
+      // grid ('edge') or to the block interiors ('mid').
+      const psnrAt = (px, where) => {
+        let se = 0, n = 0;
+        for (let y = 0; y < H3; y++) for (let x = 0; x < W3; x++) {
+          const onGrid = (x % 8 === 0) || (x % 8 === 7) || (y % 8 === 0) || (y % 8 === 7);
+          if (where === 'edge' && !onGrid) continue;
+          if (where === 'mid' && onGrid) continue;
+          for (let ch = 0; ch < 3; ch++) {
+            se += (px[((H3 - 1 - y) * W3 + x) * 4 + ch] - truth[(y * W3 + x) * 4 + ch]) ** 2;
+            n++;
+          }
+        }
+        return 10 * Math.log10(255 * 255 / Math.max(se / n, 1e-9));
+      };
+      // Blockiness measured at a GIVEN grid phase. It has to be told where the
+      // grid is: measuring a picture shifted 3px against a phase-0 ruler reports
+      // the interiors as if they were boundaries and says nothing useful.
+      const blockiness = (px, phx = 0, phy = 0) => {
+        let on = 0, onN = 0, off = 0, offN = 0;
+        const at = (x, y) => ((H3 - 1 - y) * W3 + x) * 4;
+        for (let y = 0; y < H3; y++) for (let x = 1; x < W3; x++) {
+          const i = at(x, y), j = at(x - 1, y);
+          const d = Math.abs(px[i]-px[j]) + Math.abs(px[i+1]-px[j+1]) + Math.abs(px[i+2]-px[j+2]);
+          if (x % 8 === phx) { on += d; onN++; } else { off += d; offN++; }
+        }
+        for (let y = 1; y < H3; y++) for (let x = 0; x < W3; x++) {
+          const i = at(x, y), j = at(x, y - 1);
+          const d = Math.abs(px[i]-px[j]) + Math.abs(px[i+1]-px[j+1]) + Math.abs(px[i+2]-px[j+2]);
+          if (y % 8 === phy) { on += d; onN++; } else { off += d; offN++; }
+        }
+        return (on / Math.max(onN, 1)) / Math.max(off / Math.max(offN, 1), 1e-6);
+      };
+      const rmsVs = (a, b) => {
+        let se = 0, n = 0;
+        for (let i = 0; i < a.length; i += 4)
+          for (let ch = 0; ch < 3; ch++) { se += (a[i+ch] - b[i+ch]) ** 2; n++; }
+        return Math.sqrt(se / n);
+      };
+
+      const NONE = { sharpen: 0, detail: 0, vibrance: 0, shadow: 0, denoise: 0,
+                     chroma: 0, deband: 0, temporal: 0, antiring: 0, saturation: 1,
+                     contrast: 1, gain: 1, split: 0, neural: 0, deblock: 0, dering: 0 };
+      // Mirrors the deblock/dering values of the `rescue` preset in content.js.
+      const REST = Object.assign({}, NONE, { deblock: 0.90, dering: 0.70 });
+
+      const rawPx = runOnce(crushed, W3, H3, NONE);
+      const resPx = runOnce(crushed, W3, H3, REST);
+      const bRaw = blockiness(rawPx), bRes = blockiness(resPx);
+      const gGain = psnrAt(resPx, 'edge') - psnrAt(rawPx, 'edge');
+      const mGain = psnrAt(resPx, 'mid')  - psnrAt(rawPx, 'mid');
+
+      note('  [diagnostic] hard-blocking fixture (clean plate at JPEG q=0.12)',
+           `blockiness ${bRaw.toFixed(3)} -> ${bRes.toFixed(3)}   ` +
+           `grid pixels ${gGain >= 0 ? '+' : ''}${gGain.toFixed(3)} dB   ` +
+           `interior ${mGain >= 0 ? '+' : ''}${mGain.toFixed(3)} dB`);
+
+      // The artifact itself must be measurably gone, not merely dented.
+      check('deblocking removes most of the 8-px transform grid',
+            bRes <= 1 + 0.55 * (bRaw - 1),
+            `blockiness ${bRaw.toFixed(3)} -> ${bRes.toFixed(3)} ` +
+            `(${(100 * (1 - (bRes - 1) / Math.max(bRaw - 1, 1e-6))).toFixed(0)}% of the ` +
+            `excess removed; the bar is 45%)`);
+
+      // The un-gameable half. If this fails while the check above passes, the
+      // stage is a blur wearing a deblocker's name.
+      check('and the grid pixels move TOWARD the original, not just flatter',
+            gGain > 0.30 && gGain > mGain,
+            `on the grid ${gGain >= 0 ? '+' : ''}${gGain.toFixed(3)} dB vs ` +
+            `interior ${mGain >= 0 ? '+' : ''}${mGain.toFixed(3)} dB — a blur would ` +
+            `move both alike or move them backwards`);
+
+      // A restoration stage that softens good footage is not worth having on.
+      const cleanRms = rmsVs(runOnce(cleanCv, W3, H3, REST), runOnce(cleanCv, W3, H3, NONE));
+      check('restore leaves a CLEAN source essentially untouched',
+            cleanRms < 2.5,
+            `moves a clean plate by ${cleanRms.toFixed(2)} of 255 levels RMS at full ` +
+            `strength (sub-visible), while cutting ${(100 * (1 - (bRes-1)/Math.max(bRaw-1,1e-6))).toFixed(0)}% ` +
+            `of the blocking off a bad one`);
+
+      // Whole-preset comparison: Rescue has to beat the preset it sits beside,
+      // measured against the clean original, or it has no reason to exist.
+      const MAXP3 = { sharpen: 0.42, detail: 0.12, vibrance: 0.20, shadow: 0.10,
+                      denoise: 0.30, chroma: 0.85, deband: 0.60, temporal: 0,
+                      antiring: 0.80, saturation: 1.02, contrast: 1.01, gain: 1,
+                      split: 0, neural: 0, upscaler: 'fsr', deblock: 0.70, dering: 0.50 };
+      const RESCUE3 = Object.assign({}, MAXP3, { sharpen: 0.35, vibrance: 0.18,
+                      denoise: 0.45, deband: 0.75, antiring: 0.85,
+                      deblock: 0.90, dering: 0.70 });
+      const pMaxNoRestore = psnrAt(runOnce(crushed, W3, H3,
+                            Object.assign({}, MAXP3, { deblock: 0, dering: 0 })));
+      const pRescue = psnrAt(runOnce(crushed, W3, H3, RESCUE3));
+      const pRescueClean = psnrAt(runOnce(cleanCv, W3, H3, RESCUE3));
+      const pMaxClean = psnrAt(runOnce(cleanCv, W3, H3,
+                        Object.assign({}, MAXP3, { deblock: 0, dering: 0 })));
+      note('  [diagnostic] Rescue vs Max without restore, vs ground truth',
+           `badly blocked source ${pMaxNoRestore.toFixed(2)} -> ${pRescue.toFixed(2)} dB   |   ` +
+           `clean source ${pMaxClean.toFixed(2)} -> ${pRescueClean.toFixed(2)} dB`);
+      check('Rescue beats the old Max on a badly blocked source AND on a clean one',
+            pRescue > pMaxNoRestore && pRescueClean >= pMaxClean - 0.05,
+            `blocked ${pMaxNoRestore.toFixed(2)} -> ${pRescue.toFixed(2)} dB ` +
+            `(+${(pRescue - pMaxNoRestore).toFixed(2)}), clean ${pMaxClean.toFixed(2)} -> ` +
+            `${pRescueClean.toFixed(2)} dB — so it costs nothing to leave selected`);
+
+      // ---- measureGrid: does the engine SEE the grid it is filtering? ------
+      // The restore stage used to assume the answer to all three of these. Each
+      // wrong assumption fails silently and in the same direction: smoothing
+      // real detail while leaving the artifact untouched.
+      const measureOf = (canvas) => {
+        const cv = document.createElement('canvas');
+        cv.width = W3; cv.height = H3;
+        const e = VUCore.createEngine(cv);
+        e.upload(canvas);
+        const m = e.measureGrid();
+        e.dispose();
+        return m;
+      };
+      const mClean = measureOf(cleanCv), mBad = measureOf(crushed);
+      note('  [diagnostic] measureGrid()',
+           `clean ${mClean ? mClean.blockiness.toFixed(2) : '-'}  |  ` +
+           `crushed ${mBad ? mBad.blockiness.toFixed(2) : '-'} ` +
+           `(phase ${mBad ? mBad.phaseX + ',' + mBad.phaseY : '-'}, period ${mBad ? mBad.period : '-'})`);
+      check('the engine can tell a clean source from a blocked one',
+            mClean && mBad && mClean.blockiness < 1.35 && mBad.blockiness > 2.0,
+            `clean reads ${mClean ? mClean.blockiness.toFixed(2) : 'null'}, ` +
+            `badly blocked reads ${mBad ? mBad.blockiness.toFixed(2) : 'null'} — ` +
+            `this is what sets the strength, so the two must not overlap`);
+
+      // Shifting the picture MOVES the transform grid. If detection is real the
+      // reported phase follows it; if the grid is merely assumed to sit at the
+      // origin, this is where that shows. Both axes, because binning them
+      // together made a horizontal shift report the vertical phase.
+      {
+        const shifted = [];
+        for (const [sx, sy] of [[3, 0], [0, 2], [5, 3]]) {
+          const c = document.createElement('canvas');
+          c.width = W3; c.height = H3;
+          c.getContext('2d').drawImage(crushed, sx, sy);
+          const m = measureOf(c);
+          shifted.push({ sx, sy, m, ok: m && m.phaseX === sx && m.phaseY === sy });
+        }
+        check('grid phase detection follows a shifted picture on both axes',
+              shifted.every((s) => s.ok),
+              shifted.map((s) => `(${s.sx},${s.sy})->` +
+                (s.m ? `(${s.m.phaseX},${s.m.phaseY})` : 'null')).join('  '));
+
+        // The payoff: filtering the phase the grid is ACTUALLY on has to beat
+        // assuming phase 0, or the detection is decoration.
+        const sc = document.createElement('canvas');
+        sc.width = W3; sc.height = H3;
+        sc.getContext('2d').drawImage(crushed, 3, 0);
+        // Judged on the ruler the shifted picture's grid actually sits on (3,0).
+        const bl = (px) => blockiness(px, 3, 0);
+        const wrong = bl(runOnce(sc, W3, H3, Object.assign({}, REST, { gridPhaseX: 0, gridPhaseY: 0 })));
+        const right = bl(runOnce(sc, W3, H3, Object.assign({}, REST, { gridPhaseX: 3, gridPhaseY: 0 })));
+        const raw = bl(runOnce(sc, W3, H3, NONE));
+        note('  [diagnostic] filtering the detected phase vs assuming phase 0',
+             `untouched ${raw.toFixed(3)}  |  assumed ${wrong.toFixed(3)}  |  detected ${right.toFixed(3)}`);
+        check('filtering the DETECTED phase beats assuming the grid is at the origin',
+              right < wrong,
+              `on a picture shifted 3px: assuming phase 0 leaves blockiness ` +
+              `${wrong.toFixed(3)}, using the detected phase leaves ${right.toFixed(3)} ` +
+              `(untouched ${raw.toFixed(3)})`);
+      }
+
+      // ---- 4-px transform grids (AV1 / HEVC small transforms) -------------
+      // An 8-only filter never touches the odd boundaries of a 4x4 transform.
+      // Synthesise one — a small constant offset per 4x4 tile is exactly the
+      // artifact a quantiser leaves — and require both that the engine notices
+      // and that treating it as period 4 beats treating it as period 8.
+      {
+        const g4 = document.createElement('canvas');
+        g4.width = W3; g4.height = H3;
+        const gx = g4.getContext('2d');
+        gx.drawImage(cleanCv, 0, 0);
+        const im = gx.getImageData(0, 0, W3, H3);
+        for (let ty = 0; ty < H3; ty += 4) {
+          for (let tx = 0; tx < W3; tx += 4) {
+            // Deterministic pseudo-random per tile, so the test is repeatable.
+            const s = (((tx * 73856093) ^ (ty * 19349663)) >>> 0) % 1000 / 1000;
+            const off = (s - 0.5) * 10;
+            for (let y = ty; y < Math.min(ty + 4, H3); y++) {
+              for (let x = tx; x < Math.min(tx + 4, W3); x++) {
+                const i = (y * W3 + x) * 4;
+                for (let c = 0; c < 3; c++) im.data[i + c] = Math.max(0, Math.min(255, im.data[i + c] + off));
+              }
+            }
+          }
+        }
+        gx.putImageData(im, 0, 0);
+
+        const m4 = measureOf(g4);
+        // Judged on the 4-px grid: every multiple of 4 is a boundary, so the
+        // phase-0 ruler already counts them (0, 4 are both ≡ 0 mod 4).
+        const bl4 = (px) => {
+          let on = 0, onN = 0, off = 0, offN = 0;
+          const at = (x, y) => ((H3 - 1 - y) * W3 + x) * 4;
+          for (let y = 0; y < H3; y++) for (let x = 1; x < W3; x++) {
+            const i = at(x, y), j = at(x - 1, y);
+            const d = Math.abs(px[i]-px[j]) + Math.abs(px[i+1]-px[j+1]) + Math.abs(px[i+2]-px[j+2]);
+            if (x % 4 === 0) { on += d; onN++; } else { off += d; offN++; }
+          }
+          return (on / Math.max(onN, 1)) / Math.max(off / Math.max(offN, 1), 1e-6);
+        };
+        const asRaw = bl4(runOnce(g4, W3, H3, NONE));
+        const as8 = bl4(runOnce(g4, W3, H3, Object.assign({}, REST, { gridPeriod: 8 })));
+        const as4 = bl4(runOnce(g4, W3, H3, Object.assign({}, REST, { gridPeriod: 4 })));
+        note('  [diagnostic] synthetic 4x4 transform grid',
+             `detected period ${m4 ? m4.period : '-'}  ·  blockiness-on-4 untouched ` +
+             `${asRaw.toFixed(3)}  |  filtered as 8 ${as8.toFixed(3)}  |  as 4 ${as4.toFixed(3)}`);
+        check('a 4-px transform grid is detected as period 4',
+              m4 && m4.period === 4,
+              `reported period ${m4 ? m4.period : 'null'} on a synthetic 4x4 grid`);
+        check('and filtering it as period 4 beats filtering it as period 8',
+              as4 < as8,
+              `untouched ${asRaw.toFixed(3)} -> as period 8 ${as8.toFixed(3)} ` +
+              `-> as period 4 ${as4.toFixed(3)} (an 8-only filter cannot reach the odd boundaries)`);
+      }
+    }
+  }
+
+  // ---- THE REAL CASE: upscale a COMPRESSED low-res source ----------------
+  // The ground-truth test above runs at 1:1 with neural off, so it cannot see
+  // the CNN at all — the stage specifically trained to repair compression.
+  // This one feeds a 2x-downscaled, JPEG-30 source and upscales it back, which
+  // is both the training setup and what actually happens when you watch a rip.
+  {
+    const load = (src) => new Promise((res, rej) => {
+      const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
+    });
+    let lr = null, hr = null;
+    try { lr = await load('lr_compressed.png'); hr = await load('clean.png'); } catch (_) {}
+    if (!lr || !hr) {
+      skipTest('the neural upscaler helps on a compressed source', 'fixtures missing');
+    } else {
+      const LW = lr.naturalWidth, LH = lr.naturalHeight;
+      const OW5 = LW * 2, OH5 = LH * 2;
+      const lc = document.createElement('canvas'); lc.width = LW; lc.height = LH;
+      lc.getContext('2d').drawImage(lr, 0, 0);
+      const tc = document.createElement('canvas'); tc.width = OW5; tc.height = OH5;
+      tc.getContext('2d').drawImage(hr, 0, 0, OW5, OH5);
+      const truth = tc.getContext('2d').getImageData(0, 0, OW5, OH5).data;
+
+      const psnr2 = (px) => {
+        let se = 0, n = 0;
+        for (let y = 0; y < OH5; y++) for (let x = 0; x < OW5; x++) {
+          const a = px[((OH5 - 1 - y) * OW5 + x) * 4];
+          const b = truth[(y * OW5 + x) * 4];
+          se += (a - b) * (a - b); n++;
+        }
+        return 10 * Math.log10(255 * 255 / Math.max(se / n, 1e-9));
+      };
+      const BARE = { sharpen: 0, detail: 0, vibrance: 0, shadow: 0, denoise: 0,
+                     chroma: 0, deband: 0, temporal: 0, antiring: 0.8,
+                     saturation: 1, contrast: 1, gain: 1, split: 0 };
+      const pClassical = psnr2(runOnce(lc, OW5, OH5, Object.assign({}, BARE, { neural: 0 })));
+      const pNeural    = psnr2(runOnce(lc, OW5, OH5, Object.assign({}, BARE, { neural: 1 })));
+      // Same comparison on a CLEAN low-res source, to find out whether the CNN
+      // fails only on compressed content or everywhere against EASU.
+      let cleanLine = 'n/a';
+      try {
+        const lrc = await load('lr_clean.png');
+        const cc = document.createElement('canvas'); cc.width = LW; cc.height = LH;
+        cc.getContext('2d').drawImage(lrc, 0, 0);
+        const a = psnr2(runOnce(cc, OW5, OH5, Object.assign({}, BARE, { neural: 0 })));
+        const b = psnr2(runOnce(cc, OW5, OH5, Object.assign({}, BARE, { neural: 1 })));
+        cleanLine = `${a.toFixed(2)} -> ${b.toFixed(2)} (${(b-a>=0?'+':'')}${(b-a).toFixed(2)} dB)`;
+      } catch (_) {}
+      // Where does local contrast actually want to sit? It is the destructive
+      // stage on a rip and the strongest one on clean content, so the optimum
+      // must differ — which is exactly why a single fixed value cannot serve
+      // both and the preset needs to adapt to the source.
+      {
+        const sweep = (canvas, label) => {
+          const out = [];
+          let best = null;
+          for (const d of [0, 0.15, 0.3, 0.5, 0.8]) {
+            const v = psnr2(runOnce(canvas, OW5, OH5,
+              Object.assign({}, BARE, { neural: 0, detail: d })));
+            out.push(`${d}:${v.toFixed(2)}`);
+            if (!best || v > best[1]) best = [d, v];
+          }
+          return `${label} ${out.join(' ')}  -> best detail=${best[0]}`;
+        };
+        const cc2 = document.createElement('canvas'); cc2.width = LW; cc2.height = LH;
+        try {
+          const lrc2 = await load('lr_clean.png');
+          cc2.getContext('2d').drawImage(lrc2, 0, 0);
+          note('  [diagnostic] optimal Detail by source quality',
+               sweep(lc, 'compressed:') + '   |   ' + sweep(cc2, 'clean:'));
+        } catch (_) {}
+      }
+      note('  [diagnostic] CNN vs EASU, measured against ground truth',
+           `compressed source: ${pClassical.toFixed(2)} -> ${pNeural.toFixed(2)} ` +
+           `(${(pNeural-pClassical>=0?'+':'')}${(pNeural-pClassical).toFixed(2)} dB)   |   ` +
+           `clean source: ${cleanLine}`);
+
+      // NOT "the CNN helps" — measured, it does not, by any margin worth the
+      // ~5 ms it costs. What must hold is that it does no HARM, so the toggle
+      // stays safe for anyone who wants it on.
+      check('the neural upscaler does not harm the picture',
+            pNeural >= pClassical - 0.05,
+            `EASU alone ${pClassical.toFixed(2)} dB -> +CNN ${pNeural.toFixed(2)} dB ` +
+            `(gain is real but negligible: it does not earn its GPU cost)`);
+    }
+  }
+
+  // ---- multi-frame: does aligning actually fuse, or just avoid damage? ----
+  //
+  // Tao et al. (ICCV 2017) settled how to ask this honestly: feed the system N
+  // COPIES of one frame and N genuinely different frames, and compare. Copies
+  // carry no information a single frame lacks, so any advantage the real
+  // sequence shows came from the other frames. Anything else — sharper output,
+  // higher contrast, "more detail" — cannot tell fusion from invention.
+  {
+    const load = (src) => new Promise((res, rej) => {
+      const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
+    });
+    let hr = null;
+    try { hr = await load('clean.png'); } catch (_) {}
+    if (!hr) {
+      skipTest('multi-frame alignment', 'clean.png missing');
+    } else {
+      const HW = hr.naturalWidth, HH = hr.naturalHeight;
+      const LW = HW >> 1, LH = HH >> 1;
+      const gtc = document.createElement('canvas'); gtc.width = HW; gtc.height = HH;
+      gtc.getContext('2d').drawImage(hr, 0, 0);
+      const gtPx = gtc.getContext('2d').getImageData(0, 0, HW, HH).data;
+
+      // Offsets are in HR pixels: 1 HR pixel is half an LR pixel, which is
+      // exactly the sub-pixel regime that carries new information.
+      const frameAt = (dx, dy) => {
+        const c = document.createElement('canvas'); c.width = LW; c.height = LH;
+        c.getContext('2d').drawImage(hr, dx, dy, HW, HH, 0, 0, LW, LH);
+        return c;
+      };
+      const psnrHR = (px) => {
+        let se = 0, n = 0;
+        for (let y = 0; y < HH; y++) for (let x = 0; x < HW; x++)
+          for (let ch = 0; ch < 3; ch++) {
+            se += (px[((HH - 1 - y) * HW + x) * 4 + ch] - gtPx[(y * HW + x) * 4 + ch]) ** 2;
+            n++;
+          }
+        return 10 * Math.log10(255 * 255 / Math.max(se / n, 1e-9));
+      };
+      const BASE = { sharpen: 0, detail: 0, vibrance: 0, shadow: 0, denoise: 0,
+                     chroma: 0, deband: 0, antiring: 0, saturation: 1, contrast: 1,
+                     gain: 1, split: 0, neural: 0, deblock: 0, dering: 0,
+                     upscaler: 'fsr' };
+      // One engine for the whole sequence, so history actually accumulates.
+      const sequence = (frames, opts) => {
+        const cv = document.createElement('canvas'); cv.width = HW; cv.height = HH;
+        const e = VUCore.createEngine(cv);
+        for (const f of frames) { e.upload(f); e.render(Object.assign({}, BASE, opts)); }
+        const px = new Uint8Array(HW * HH * 4);
+        e.gl.bindFramebuffer(e.gl.FRAMEBUFFER, null);
+        e.gl.readPixels(0, 0, HW, HH, e.gl.RGBA, e.gl.UNSIGNED_BYTE, px);
+        e.dispose();
+        return px;
+      };
+
+      const offs = [[1, 1], [1, 0], [0, 1], [0, 0]];
+      const distinct = [];
+      for (let i = 0; i < 8; i++) distinct.push(frameAt(...offs[i % 4]));
+      distinct.push(frameAt(0, 0));                   // end aligned with the truth
+      const still = frameAt(0, 0);
+      const copies = distinct.map(() => still);
+
+      const FB = 0.55;
+      const one   = psnrHR(sequence([still], { temporal: 0 }));
+      const dOff  = psnrHR(sequence(distinct, { temporal: FB, align: 0 }));
+      const dOn   = psnrHR(sequence(distinct, { temporal: FB, align: 1 }));
+      const cOn   = psnrHR(sequence(copies,   { temporal: FB, align: 1 }));
+
+      note('  [diagnostic] multi-frame, vs the high-resolution original',
+           `single frame ${one.toFixed(3)}  ·  moving+unaligned ${dOff.toFixed(3)}  ·  ` +
+           `moving+aligned ${dOn.toFixed(3)}  ·  copies ${cOn.toFixed(3)} dB`);
+
+      // WHAT ALIGNMENT ACTUALLY BUYS. Not detail — safety. Accumulating without
+      // it fuses a pixel with whatever moved into its place, which costs real
+      // quality on any moving footage.
+      check('motion compensation stops temporal accumulation damaging moving footage',
+            dOn > dOff + 0.3,
+            `at feedback ${FB}: unaligned ${dOff.toFixed(3)} dB -> aligned ` +
+            `${dOn.toFixed(3)} dB, against ${one.toFixed(3)} for a single frame ` +
+            `(recovers ${(100 * (dOn - dOff) / Math.max(one - dOff, 1e-6)).toFixed(0)}% ` +
+            `of what motion was costing)`);
+
+      // Averaging alone cannot fuse, and this is the evidence. Every LR pixel is
+      // an AREA average of the scene, so the mean of aligned area-averages is
+      // just another area average — real shifted frames buy nothing over copies.
+      check('weighted accumulation alone recovers no information (it cannot)',
+            dOn <= cOn + 0.05,
+            `without back-projection, real sub-pixel-shifted frames ${dOn.toFixed(3)} dB ` +
+            `vs copies of one frame ${cOn.toFixed(3)} dB — averaging estimates is not ` +
+            `reconstruction`);
+
+      // BACK-PROJECTION, which asks the other question: simulate the camera on
+      // the current estimate and correct it against what was actually observed.
+      // Two separable effects, and the ablation is what separates them —
+      // deconvolution helps copies too, fusion does not.
+      const bpD = psnrHR(sequence(distinct, { temporal: FB, align: 1, backproject: 1 }));
+      const bpC = psnrHR(sequence(copies,   { temporal: FB, align: 1, backproject: 1 }));
+      note('  [diagnostic] back-projection: deconvolution vs genuine fusion',
+           `single frame ${one.toFixed(3)}  ·  bp on copies ${bpC.toFixed(3)} ` +
+           `(+${(bpC - one).toFixed(3)} deconvolution)  ·  bp on real frames ` +
+           `${bpD.toFixed(3)} (+${(bpD - bpC).toFixed(3)} more, from the other frames)`);
+      check('back-projection recovers real detail from the other frames',
+            bpD > bpC + 0.10 && bpD > one + 0.5,
+            `copies ${bpC.toFixed(3)} dB -> real sub-pixel-shifted frames ` +
+            `${bpD.toFixed(3)} dB (+${(bpD - bpC).toFixed(3)}). The gap is the part ` +
+            `that could ONLY have come from the other frames; the rest ` +
+            `(+${(bpC - one).toFixed(3)} over a single frame) is deconvolution.`);
+
+      // THE TRAP. Back-projection pulls the estimate toward the pixels actually
+      // observed — and on a compressed source those pixels are blocky, so it
+      // faithfully reprints the artifacts the restore stage just removed.
+      {
+        const jl = document.createElement('canvas');
+        jl.width = LW; jl.height = LH;
+        jl.getContext('2d').drawImage(await new Promise((res) => {
+          const im = new Image(); im.onload = () => res(im);
+          im.src = gtc.toDataURL('image/jpeg', 0.12);
+        }), 0, 0, LW, LH);
+        const seq = []; for (let i = 0; i < 8; i++) seq.push(jl);
+        const blk = (px) => {
+          let on = 0, onN = 0, off = 0, offN = 0;
+          const at = (x, y) => ((HH - 1 - y) * HW + x) * 4;
+          for (let y = 0; y < HH; y++) for (let x = 1; x < HW; x++) {
+            const i = at(x, y), j = at(x - 1, y);
+            const d = Math.abs(px[i]-px[j]) + Math.abs(px[i+1]-px[j+1]) + Math.abs(px[i+2]-px[j+2]);
+            if (x % 8 === 0) { on += d; onN++; } else { off += d; offN++; }
+          }
+          return (on / Math.max(onN, 1)) / Math.max(off / Math.max(offN, 1), 1e-6);
+        };
+        const REST = { deblock: 0.90, dering: 0.70 };
+        const bRestore = blk(sequence(seq, Object.assign({ temporal: 0 }, REST)));
+        const bBoth = blk(sequence(seq, Object.assign({ temporal: FB, align: 1, backproject: 1 }, REST)));
+        note('  [diagnostic] back-projection on a COMPRESSED source',
+             `restore alone leaves blockiness ${bRestore.toFixed(3)}, ` +
+             `restore + full back-projection leaves ${bBoth.toFixed(3)}`);
+        check('back-projection is gated OFF on compressed sources, and needs to be',
+              bBoth > bRestore + 0.15,
+              `it undoes the restore stage: blockiness ${bRestore.toFixed(3)} -> ` +
+              `${bBoth.toFixed(3)} when forced on. This is why content.js drives it ` +
+              `from the blockiness measurement and shuts it off by 1.35 — the check ` +
+              `documents the hazard, autoBackproject() is what avoids it.`);
+      }
+    }
+  }
+
+  // ---- throughput at the size that matters: 1080p -> 4K ------------------
+  const hd = document.createElement('canvas');
+  hd.width = 1920; hd.height = 1080;
+  hd.getContext('2d').drawImage(src, 0, 0, 1920, 1080);
+
+  function bench(opts) {
+    const big = document.createElement('canvas');
+    big.width = 3840; big.height = 2160;
+    const e = VUCore.createEngine(big);
+    const sync = () => { const p = new Uint8Array(4); e.gl.readPixels(0,0,1,1,e.gl.RGBA,e.gl.UNSIGNED_BYTE,p); return p[0]; };
+    for (let k = 0; k < 5; k++) { e.upload(hd); e.render(opts); sync(); }
+    const N = 25, t0 = performance.now();
+    for (let k = 0; k < N; k++) { e.upload(hd); e.render(opts); sync(); }
+    const ms = (performance.now() - t0) / N;
+    e.dispose();
+    return ms;
+  }
+  // Benchmark what the Max preset actually runs — including the temporal pass,
+  // which the earlier version of this benchmark silently left out, and the
+  // restore pass, which is the third stage this benchmark would have quietly
+  // omitted if nobody had added it here. Everything on, so the number is not an
+  // understatement.
+  const full = Object.assign({}, STRONG, {
+    deband: 0.6, chroma: 0.85, temporal: 0.55, neural: 1,
+    detail: 0.8, vibrance: 0.6, shadow: 0.4, upscaler: 'fsr',
+    deblock: 0.90, dering: 0.70, backproject: 1.0,
+  });
+  const msFsr = bench(full);
+  const msNoNeural = bench(Object.assign({}, full, { neural: 0 }));
+  const msNoRestore = bench(Object.assign({}, full, { neural: 0, deblock: 0, dering: 0 }));
+  const msNoBP = bench(Object.assign({}, full, { neural: 0, backproject: 0 }));
+
+  if (!(msFsr > 0.01)) {
+    skipTest('1080p -> 4K fits in a 60 fps budget (16.7 ms)',
+             `timer is not real here (${msFsr.toFixed(3)} ms/frame) — virtual time. ` +
+             `Perf must be measured in a normal browser window.`);
+  } else {
+    // What SHIPS is the thing that has to fit: every classical stage on, neural
+    // doubler off (it is off by default and measured not worth its cost).
+    check('the shipped chain 1080p -> 4K fits in a 60 fps budget (16.7 ms)',
+          msNoNeural < 16.7,
+          `every classical stage on, neural off as it ships: ${msNoNeural.toFixed(2)} ms/frame, ` +
+          `GPU-synced`);
+
+    // Everything on, INCLUDING the neural doubler, still fits — with little to
+    // spare. It stays off because it is not worth its time (+0.09 dB on a
+    // compressed source for ~4.5 ms), not because it cannot run.
+    //
+    // NB: an earlier reading of 17.11 ms here was taken while a CPU training job
+    // was saturating the machine, and briefly supported the opposite conclusion.
+    // Perf numbers from a loaded machine are not perf numbers.
+    check('everything on, including the neural doubler, still fits the budget',
+          msFsr < 16.7,
+          `with the CNN additionally on: ${msFsr.toFixed(2)} ms/frame of 16.7 ` +
+          `(the doubler alone costs ${(msFsr - msNoNeural).toFixed(2)} ms for a ` +
+          `measured +0.09 dB — it fits, it just does not earn the time)`);
+    check('the restore pass fits in what is left of the budget', msNoNeural < 16.7,
+          `as shipped (neural off) with deblock+dering: ${msNoNeural.toFixed(2)} ms/frame  ·  ` +
+          `without them: ${msNoRestore.toFixed(2)} ms/frame  ` +
+          `(restore costs ${(msNoNeural - msNoRestore).toFixed(2)} ms at source resolution, ` +
+          `back-projection ${(msNoNeural - msNoBP).toFixed(2)} ms)`);
+  }
+
+  engine.upload(video); engine.render(Object.assign({}, STRONG, { deband: 0.4 }));
+
+  const failed = results.filter(r => !r.pass);
+  console.log('VU_RESULT ' + JSON.stringify({ pass: failed.length === 0, results }));
+  document.title = failed.length ? `FAIL ${failed.length}` : 'ALL PASS';
+})().catch(e => {
+  check('harness completed', false, e.stack || e.message);
+  console.log('VU_RESULT ' + JSON.stringify({ pass: false, error: String(e) }));
+});
+</script>

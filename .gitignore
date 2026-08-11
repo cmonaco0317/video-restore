@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# Scratch workspace created by tools/verify-screenshare.py (Chrome profile,
+# captures, a generated video fixture). Rebuilt on every run.
+.screenshare-probe/
+
+# Training scratch lives under cnn/ and is ignored by cnn/.gitignore:
+# the 355 MB film, its extracted frames, the ~420 MB patch cache and the
+# checkpoint. All reproducible with `python cnn/train.py prepare`.
+# The SHIPPED artifacts (cnn/weights.json, cnn-weights.js) are tracked.
