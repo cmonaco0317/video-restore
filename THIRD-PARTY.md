@@ -1,7 +1,10 @@
 # Third-party material
 
-Two things in this repository are not mine, and both carry obligations that
-travel with any copy of it.
+The MIT licence in `LICENSE` covers the code in this repository. It does **not**
+cover the material below, which is bundled here under its own terms.
+
+Two things are not mine, and both carry obligations that travel with any copy of
+this repository.
 
 ---
 
