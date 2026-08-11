@@ -1,8 +1,72 @@
 # Video Upscaler
 
-A Chrome extension you invoke on a specific page to upscale and sharpen whatever
-video is playing there. The processed picture is composited into the page, so it
-survives screenshare, AirPlay **mirroring**, and HDMI.
+A Chrome extension that upscales and repairs whatever video is playing on the
+page, on the GPU, in real time. The processed picture is composited *into* the
+page, so it survives screen sharing and display mirroring.
+
+It fits 1080p→4K in **10.54 ms of a 16.7 ms frame budget**, removes **75% of the
+blocking** from a badly compressed source, and does genuine multi-frame
+reconstruction. But that is not the interesting part.
+
+## The interesting part is what didn't work
+
+Most of what I was confident about turned out to be wrong, and the measurements
+are in the repository rather than the summary. Four examples, all with the
+numbers that killed them in [`STATE.md`](STATE.md):
+
+- **"WebGPU compute will make a bigger neural model affordable."** The model was
+  retired because 16 filters cost 14.62 ms in a fragment shader, and fragment
+  shaders have no shared memory or FP16. So I built the compute version with
+  both, verified it against the same PyTorch reference — and got **1.11×** on the
+  shipped model, **1.32×** at 16 filters. Still doesn't fit. The constraint was
+  arithmetic, not the API. That killed an engine rewrite I was one step from
+  recommending. ([`test/webgpu.html`](test/webgpu.html) keeps the measurement.)
+
+- **"Fusing several frames will recover real detail."** True in the literature,
+  false as I first built it. Aligned accumulation of real sub-pixel-shifted
+  frames scored **36.056 dB**; feeding it *copies of a single frame* scored
+  **36.253**. The extra frames contributed nothing, because every low-res pixel
+  is an area average and the mean of aligned area averages is just another area
+  average. It took **back-projection** — simulate the camera, correct against
+  what was actually observed — to make the extra frames matter.
+
+- **"A better architecture at the same cost."** ArtCNN beats this class of model
+  at similar parameter counts, so the limiter looked architectural. Four
+  variants, same data, same seed: baseline **31.111**, ArtCNN's long skip
+  **31.017**, deeper **31.072**, both **30.332**. The shipped one won. The real
+  limiter was *data* — 320→900 training frames moved it +1.016→**+1.278 dB**.
+
+- **"Cleaning up blocking will make local contrast affordable."** The reasoning
+  was sound and the measurement said 6%, not an unlock.
+
+**Why this is in the README:** on a compressed source, amplified artifact and
+recovered detail are the same high-frequency energy, so any metric that asks "is
+there more detail?" will call a wrecked picture an improvement. About 60 tests
+here were green while the output was visibly ruined. Everything now measures
+**distance to a clean original**, and the load-bearing checks are ablations
+designed so that the pleasant answer and the true answer come apart.
+
+## What it will not do
+
+Make a bad source look great. The detail is not hiding under the artifacts — the
+encoder discarded it, and nothing at this speed reconstructs it. Expect *visibly
+cleaner*, not *sharper*. The single biggest quality lever remains getting a
+better source, which is why the extension now goes and asks for one.
+
+It also does not circumvent anything. It reads frames the page has already
+decoded, through the ordinary canvas API, and when a protected pipeline hands
+back black frames it detects that and steps out of the way. There is no DRM
+involved on either side of that.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE). **Read [THIRD-PARTY.md](THIRD-PARTY.md) before
+redistributing:** the upscaling kernels are adapted from AMD's FidelityFX FSR
+(MIT), and the test fixtures, the training data and the shipped model weights are
+all derived from *Tears of Steel* ((CC) Blender Foundation, CC BY 3.0), whose
+attribution travels with any copy — including screenshots of the comparison page.
+
+---
 
 ## Getting at it
 
@@ -27,12 +91,18 @@ granted at install, and removing a site revokes the permission with it.
 
 ## Does it survive my output path?
 
-| Output path | Works? | Why |
+This is the point of the whole design, so the table separates what has been
+**measured** from what is only **reasoned**. A plain `<video>` does not always
+survive these paths — video can be handed to a hardware overlay plane or a
+protected pipeline the compositor never sees, which is why some screen recordings
+come out black. Compositing a canvas into the page is the thing that avoids it.
+
+| Output path | Works? | Evidence |
 |---|---|---|
-| **HDMI to a TV** | ✅ Yes | macOS composites the whole window to the display. The upscaled pixels are the window. |
-| **AirPlay Screen Mirroring** (Control Center → Screen Mirroring) | ✅ Yes | Same — it mirrors the composited desktop. |
-| **Screenshare** (Zoom, Meet, Teams, Discord) | ✅ Yes | Screen/window capture reads composited output. |
-| **Native AirPlay video** (the AirPlay button *inside* the player) | ❌ **No** | This hands the raw stream URL to the Apple TV. Your Mac stops rendering the video entirely, so there is nothing for the extension to touch. **Use Screen Mirroring instead.** |
+| **Screenshare** (Zoom, Meet, Teams, Discord) | ✅ **Measured** | `python3 tools/verify-screenshare.py` captures the window with the upscaler off and then on, over a still fixture whose frames are identical by construction: the video region moves by a mean of 7.44/255 with **91.7%** of sampled pixels changing. Same window-server composite these apps read. |
+| **HDMI to a TV** | ⚠️ Reasoned, untested | macOS composites the whole window to the display, and that is the same composite the screenshare test just proved. Strong, but nobody has plugged in a TV. |
+| **AirPlay Screen Mirroring** (Control Center → Screen Mirroring) | ⚠️ Reasoned, untested | Same argument — it mirrors the composited desktop. No AirPlay receiver was available to confirm it. |
+| **Native AirPlay video** (the AirPlay button *inside* the player) | ❌ **No**, by design | This hands the raw stream URL to the Apple TV. Your Mac stops rendering the video entirely, so there is nothing for the extension to touch. **Use Screen Mirroring instead.** |
 | **Picture-in-Picture** | ❌ No | The OS PiP window renders the raw video element directly, bypassing the page. |
 
 The one thing to actually remember: **for AirPlay, use Screen Mirroring, not the
