@@ -208,6 +208,7 @@ follows the video into fullscreen.
 |---|---|
 | GPU or CSS-filter mode | whether frames can actually be read (DRM, cross-origin, no WebGL2) |
 | Deblock strength | measured blockiness of the source, on a curve fitted to four measured optima |
+| Denoise strength | the same measurement — zero on a clean source, full on a badly compressed one |
 | Which grid to deblock | the transform grid's phase and period, **detected per axis** |
 | Back-projection gain | the same blockiness measurement — full on a clean source, zero by the time blocking is merely noticeable |
 | Render scale | the frame budget, closed-loop |
@@ -418,7 +419,7 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 
 `ledger status` in this folder is the machine-checked truth:
 
-**17 active claims: 15 passing, 0 failing, 2 awaiting hardware.**
+**18 active claims: 16 passing, 0 failing, 2 awaiting hardware.**
 
 | | claim |
 |---|---|
@@ -429,6 +430,7 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 | PASS | `no-harm-on-bad-sources` — `max` stays within 1.0 dB of untouched on a crf45 rip |
 | PASS | `restore-removes-compression-damage` — 75% of the excess blocking, with the signature a blur cannot fake |
 | PASS | `restore-measures-the-source` — strength, grid phase and grid period are all measured, not assumed |
+| PASS | **`auto-denoise-fitted-on-detail-split`** — denoise auto-tunes too, on a metric a blur cannot fool |
 | PASS | `rescue-preset-dominates` — beats the previous best preset on every source, including clean |
 | PASS | `multiframe-reconstruction` — real detail from neighbouring frames, isolated by the copies-vs-real ablation |
 | PASS | `backprojection-gated-on-source-quality` — and it has to be; ungated it reprints the blocking |

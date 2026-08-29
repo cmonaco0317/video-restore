@@ -9,3 +9,6 @@
 # the 355 MB film, its extracted frames, the ~420 MB patch cache and the
 # checkpoint. All reproducible with `python cnn/train.py prepare`.
 # The SHIPPED artifacts (cnn/weights.json, cnn-weights.js) are tracked.
+
+# Byte-cache from tools/sweep-auto.py importing test/run.py
+__pycache__/

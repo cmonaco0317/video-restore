@@ -199,6 +199,8 @@ reliable GPU sync on ANGLE/Metal — use a blocking `readPixels`.
 | Luma-adaptive deband | Investigated, no deficiency existed — dark 10% vs mid 9%. |
 | Multi-frame fusion **by weighted averaging** | Does not work, and the reason is structural. Aligned accumulation of real sub-pixel-shifted frames scores 36.056 dB against the HR original; **copies of a single frame score 36.253** — the extra frames contribute nothing. Every LR pixel is an AREA average of the scene, and the mean of aligned area-averages is just another area average. TAA works only because renderers emit jittered POINT samples. ✅ **Solved by back-projection instead — see below.** |
 | **A better CNN *architecture* at the same cost** | **Refuted by a controlled experiment — the shipped architecture already wins.** The reasoning was that ArtCNN beats this class of model at similar parameter counts, so the limiter might be architecture rather than capacity, and that depth is cheap here (linear) where width is not (quadratic — which is why the 16-filter test failed). Four variants, same data, same seed, same 60 epochs, val PSNR: **baseline 8f/4L 31.111** · +ArtCNN long skip 31.017 · 8f/**6L** 31.072 · 6L+skip 30.332. Neither the skip nor the extra depth helps; the deepest-plus-skip variant is much worse. Do not re-pitch "add a residual connection" or "make it deeper". |
+| **Auto-tuning DEBAND** | **Nothing to adapt, and PSNR cannot see it.** Swept 0..1 against ground truth across seven sources (clean, five JPEG levels, the real rip): the best achievable gain anywhere was **0.001 dB**, i.e. noise. That is NOT "deband is useless" — banding affects few pixels by small amounts, so a squared-error metric is blind to it, the same way it is blind to the look stages. It keeps its own instrument (banding-plateau length, already in the suite) and stays at a fixed strength. Do not re-pitch driving it from blockiness; there is no signal to drive. |
+| **Auto-tuning CHROMA off blockiness** | **The optimum moves a lot, but blockiness is the WRONG driver — and this nearly shipped.** On a JPEG ladder the best chroma strength climbs beautifully with blockiness (1.46 -> 0.4, 2.17 -> 0.6, 2.82 -> 0.85, 4.46 -> 1.0), which is exactly the tidy fit that invites shipping. But `lowbitrate.png` at blockiness **2.234** wants **0.0**, where JPEG at blockiness **2.166** wants **0.6** — near-identical blockiness, opposite answers, and going up only hurts the rip (24.503 -> 24.388 monotonically). Measuring the thing the stage actually repairs explains it: every JPEG source carries chroma error ≳ luma error (ratio 1.13-1.29) because JPEG subsamples 4:2:0, while the rip's chroma is relatively intact (ratio **0.401**). **Blockiness is a luma-grid measurement and chroma bleed is a different axis.** Fitting to it would have looked perfect on the ladder and been actively wrong on the one real-world fixture. Chroma stays fixed until there is a runtime-computable chroma-resolution measurement — the ratio used here needs the clean original, which production does not have. |
 | Optical flow with the sign of `d` unflipped | −5.8 dB, *worse than no alignment at all*. LK minimises Σ(∇c·d + It)² so A·d = −b; the positive solution warps history away from the match. It reads exactly like "multi-frame does not work" rather than like a one-character bug. |
 | **Deblocking would make `detail` affordable** | **Wrong — the reason the restore stage was built, and the measurement killed it.** The argument was sound: local contrast amplifies the 8–64 px band, which is where blocking lives, so cleaning the grid first should let Detail run hard. Measured on a crf45 rip, Detail 0.30 costs 1.246 dB raw and 1.176 dB after restore — a 6% saving, not an unlock. Detail damages the block *interiors* more than the grid (−1.32 dB vs −1.10 dB), so block edges were never its main cost. **Detail stays at 0.12 in every heavy preset.** |
 | Per-pixel deblock decisions | Blockiness 1.74 → 1.58 only, because per-pixel noise keeps the gate shut. Averaging the step ALONG the boundary (coherent = manufactured, incoherent = real) took the same source to 1.31 at the same strength. |
@@ -392,11 +394,16 @@ one video, which no static preset can do and which is **not yet measured**.
 
 Order to build it: ~~(1) ship `rescue` + auto as the only mode and delete the
 preset picker~~ ✅ **DONE 2026-08-29** — see "IT IS NOW FULLY AUTOMATIC" above and
-the `no-settings-to-get-wrong` claim. **(2) extend auto-tuning to denoise, deband
-and chroma** on the existing ground-truth rig — these have valid objectives and
-the ablation table says they are near-neutral, so it is low-risk and measurable.
+the `no-settings-to-get-wrong` claim. ~~(2) extend auto-tuning to denoise, deband and
+chroma~~ ✅ **DONE 2026-08-29, and it split three ways** — denoise now auto-tunes
+(`auto-denoise-fitted-on-detail-split`); deband has nothing to adapt and PSNR
+cannot see it; chroma's optimum moves but blockiness is the wrong driver. Both
+negative results are in the rejected table above, with the numbers.
 **(3) MEASURE whether per-shot look adaptation beats a fixed look** before
 building it; the project's own metric suggests it may not.
+**(4) A runtime-computable chroma-resolution measurement** would unlock the one
+stage step 2 had to defer — it needs to detect 4:2:0 bleed *without* a clean
+original to compare against.
 
 🔴 **Two risks worth writing down now.** Parameters that change mid-shot make the
 picture *pump*, and there is **no test in the suite that would catch that** — the

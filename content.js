@@ -145,6 +145,40 @@
    * tightly: full only on a genuinely clean source, off by the time blocking is
    * merely noticeable.
    */
+  /**
+   * Blockiness -> denoise strength.
+   *
+   * Fitted to the strengths that measured best against a clean original, on a
+   * ladder of JPEG degradations plus the real rip (worst error 0.018):
+   *     clean  1.06 -> 0        q0.35  1.76 -> 0.8      q0.12  2.82 -> 1.0
+   *     q0.6   1.46 -> 0.6      q0.2   2.17 -> 1.0      rip    2.23 -> 1.0
+   * Square root for the same reason as deblock: the damage climbs faster than
+   * the useful correction does.
+   *
+   * 🔴 The naive version of this measurement was WRONG and would have shipped a
+   * blur. A single PSNR number rises monotonically to denoise=1.0 on every
+   * compressed source and never turns over, which is what "smoothing lowers
+   * mean squared error" looks like, not what an optimum looks like.
+   *
+   * What settles it is splitting the score by how much detail the GROUND TRUTH
+   * carries at each pixel — a split defined on the clean original, so it shares
+   * no null space with the filter being tuned (the same construction that makes
+   * the deblock claim trustworthy). Read that way the stage defends itself: on a
+   * CLEAN plate denoise damages both halves (-15.6 dB detailed, -5.9 dB flat at
+   * full strength — the signature of a blur), while on a compressed source BOTH
+   * halves improve (q0.2 at full: +0.264 dB detailed, +0.763 dB flat). A blur
+   * cannot lift both. At those compression levels the high-frequency content in
+   * "detailed" regions is mostly artifact, so removing it really does move
+   * toward the original.
+   *
+   * Only at MILD compression does detail turn over before full strength (q0.6
+   * peaks at 0.6 and goes negative by 1.0), which is exactly what the curve's
+   * slow start protects.
+   */
+  function autoDenoise(blockiness) {
+    return Math.max(0, Math.min(1, Math.sqrt(Math.max(0, (blockiness - 1.10) / 1.05))));
+  }
+
   function autoBackproject(blockiness) {
     return Math.max(0, Math.min(1, (1.35 - blockiness) / 0.23));
   }
@@ -766,10 +800,12 @@
       // (0.7), because the grid is filtered at source resolution either way.
       // The proxy is gone; the measurement replaces it.
       let backproject = S.backproject;
+      let denoise = S.denoise;
       if (S.autoRestore && this.grid) {
         deblock = autoDeblock(this.grid.blockiness);
         dering = 0.75 * deblock;
         backproject = autoBackproject(this.grid.blockiness);
+        denoise = autoDenoise(this.grid.blockiness);
       }
 
       const cb = contentBox(v);
@@ -778,7 +814,7 @@
         neural: bypassHeld ? 0 : S.neural,
         upscaler: S.upscaler,
         sharpen: bypassHeld ? 0 : sharpen,
-        denoise: bypassHeld ? 0 : S.denoise,
+        denoise: bypassHeld ? 0 : denoise,
         deband: bypassHeld ? 0 : deband,
         chroma: bypassHeld ? 0 : S.chroma,
         deblock: bypassHeld ? 0 : deblock,
@@ -1033,7 +1069,8 @@ button.mini:disabled { opacity:.55; cursor:default; }
         (s.mode === 'gpu' && S.adaptive ? `<br>render ×<b>${S.renderScale.toFixed(2)}</b>` : '') +
         (s.mode === 'gpu' && S.autoRestore && u.grid
           ? `<br>source: <b>${u.grid.blockiness < 1.3 ? 'clean' : u.grid.blockiness < 2 ? 'compressed' : 'heavily compressed'}</b>` +
-            ` &nbsp;·&nbsp; deblock <b>${autoDeblock(u.grid.blockiness).toFixed(2)}</b>` +
+            `<br>deblock <b>${autoDeblock(u.grid.blockiness).toFixed(2)}</b>` +
+            ` &nbsp;·&nbsp; denoise <b>${autoDenoise(u.grid.blockiness).toFixed(2)}</b>` +
             (autoBackproject(u.grid.blockiness) > 0.05
               ? `<br><span class="up">reconstructing from ${S.temporal > 0 ? 'multiple frames' : 'the observed pixels'}</span>`
               : '') : '') +
@@ -1238,6 +1275,7 @@ button.mini:disabled { opacity:.55; cursor:default; }
     governor: quality,
     autoDeblock,
     autoBackproject,
+    autoDenoise,
   };
 
   // Set by the service worker immediately before a deliberate invocation, in the

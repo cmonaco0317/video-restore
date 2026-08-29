@@ -1,0 +1,210 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Video Upscaler — auto-tuning sweep</title>
+<!-- RESEARCH SWEEP, not a pass/fail harness. Answers ONE question before any
+     code gets written for it:
+
+       does the optimal denoise / deband / chroma strength actually MOVE with
+       source quality?
+
+     If the argmax is flat across a continuum of degradation there is nothing to
+     adapt, auto-tuning those stages is a no-op, and the cheap measurement has
+     killed the work before the rewrite — which is how deblocking-makes-detail-
+     affordable, weighted-average multi-frame, and the bigger CNN all died here.
+
+     Method: sweep ONE stage at a time from an all-off baseline, exactly like the
+     existing ablation, and score every setting by distance to the clean original.
+     Rendering is 1:1 so the upscaler cannot contribute. Read with
+     tools/sweep-auto.py. -->
+<style>body{background:#0d1018;color:#dfe6ef;font:12px/1.5 ui-monospace,Menlo,monospace;margin:20px}
+pre{white-space:pre-wrap}</style>
+<pre id="log">running…</pre>
+<script src="../cnn-weights.js"></script>
+<script src="../core.js"></script>
+<script>
+const out = [];
+const say = (s) => { out.push(s); document.getElementById('log').textContent = out.join('\n'); };
+
+const load = (src) => new Promise((res, rej) => {
+  const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
+});
+
+// Re-encode a canvas as JPEG at quality q and hand back a canvas. This is the
+// same degradation the restore tests use, and it gives a CONTINUUM of source
+// quality rather than the two fixtures, which is what the question needs.
+function crush(srcCanvas, q) {
+  return new Promise((res) => {
+    const im = new Image();
+    im.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = srcCanvas.width; c.height = srcCanvas.height;
+      c.getContext('2d').drawImage(im, 0, 0);
+      res(c);
+    };
+    im.src = srcCanvas.toDataURL('image/jpeg', q);
+  });
+}
+
+function toCanvas(img, w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(img, 0, 0, w, h);
+  return c;
+}
+
+const OFF = { sharpen: 0, detail: 0, vibrance: 0, shadow: 0, denoise: 0, chroma: 0,
+              deband: 0, temporal: 0, antiring: 0, saturation: 1, contrast: 1,
+              gain: 1, split: 0, neural: 0, deblock: 0, dering: 0, backproject: 0,
+              upscaler: 'fsr' };
+
+(async () => {
+  let clean, rip;
+  try { clean = await load('clean.png'); rip = await load('lowbitrate.png'); }
+  catch (e) { say('FIXTURES MISSING: ' + e); document.title = 'done'; return; }
+
+  const W = clean.naturalWidth, H = clean.naturalHeight;
+  const gtPx = toCanvas(clean, W, H).getContext('2d').getImageData(0, 0, W, H).data;
+
+  /* A single PSNR number can trade a big win in flat areas against real damage
+   * in detailed ones and still come out ahead — which is exactly what a
+   * monotonically-rising denoise curve looks like. So split the measurement by
+   * how much DETAIL THE GROUND TRUTH has at each pixel.
+   *
+   * The split is defined on the clean original, never on the source or the
+   * output, so it shares no null space with the filter being tuned. That is the
+   * same construction that made the deblock claim trustworthy (grid pixels vs
+   * interior pixels): a real improvement lifts both halves, a blur lifts the
+   * flat half while dropping the detailed one. */
+  const detailMask = (() => {
+    const m = new Uint8Array(W * H);
+    const lum = new Float32Array(W * H);
+    for (let i = 0, p = 0; i < gtPx.length; i += 4, p++) {
+      lum[p] = 0.2126 * gtPx[i] + 0.7152 * gtPx[i + 1] + 0.0722 * gtPx[i + 2];
+    }
+    const act = new Float32Array(W * H);
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const p = y * W + x;
+      act[p] = Math.abs(lum[p] - lum[p - 1]) + Math.abs(lum[p] - lum[p + 1]) +
+               Math.abs(lum[p] - lum[p - W]) + Math.abs(lum[p] - lum[p + W]);
+    }
+    // Top third by local activity = "detailed"; bottom third = "flat".
+    const sorted = Float32Array.from(act).sort();
+    const hi = sorted[Math.floor(sorted.length * 0.67)];
+    const lo = sorted[Math.floor(sorted.length * 0.33)];
+    for (let p = 0; p < act.length; p++) m[p] = act[p] >= hi ? 2 : (act[p] <= lo ? 1 : 0);
+    return m;
+  })();
+
+  function psnrWhere(px, want) {
+    let se = 0, n = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (detailMask[y * W + x] !== want) continue;
+      const a = px[((H - 1 - y) * W + x) * 4];
+      const b = gtPx[(y * W + x) * 4];
+      se += (a - b) * (a - b); n++;
+    }
+    return n ? 10 * Math.log10(255 * 255 / Math.max(se / n, 1e-9)) : NaN;
+  }
+
+  // px comes back bottom-up from readPixels; ground truth is top-down.
+  function psnr(px) {
+    let se = 0, n = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const a = px[((H - 1 - y) * W + x) * 4];
+      const b = gtPx[(y * W + x) * 4];
+      se += (a - b) * (a - b); n++;
+    }
+    return 10 * Math.log10(255 * 255 / Math.max(se / n, 1e-9));
+  }
+
+  function render(srcCanvas, opts) {
+    const cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    const e = VUCore.createEngine(cv);
+    e.upload(srcCanvas);
+    e.render(Object.assign({}, OFF, opts));
+    const gl = e.gl;
+    const px = new Uint8Array(W * H * 4);
+    gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    e.dispose();
+    return px;
+  }
+
+  /* Blockiness is a LUMA-grid measurement. Chroma reconstruction repairs 4:2:0
+   * subsampling, which is a different axis entirely — so before using blockiness
+   * to drive it, measure the thing it actually repairs: how far the source's
+   * colour has drifted from ground truth, relative to its luma drift. A source
+   * with heavy luma damage and intact chroma has nothing for this stage to do. */
+  function chromaErrorOf(srcCanvas) {
+    const px = srcCanvas.getContext('2d').getImageData(0, 0, W, H).data;
+    let luma = 0, chroma = 0, n = 0;
+    for (let i = 0; i < px.length; i += 4) {
+      const y1 = 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+      const y2 = 0.2126 * gtPx[i] + 0.7152 * gtPx[i + 1] + 0.0722 * gtPx[i + 2];
+      // Cb/Cr up to a scale factor; only the RATIO to luma error matters here.
+      const cb1 = px[i + 2] - y1, cr1 = px[i] - y1;
+      const cb2 = gtPx[i + 2] - y2, cr2 = gtPx[i] - y2;
+      luma += Math.abs(y1 - y2);
+      chroma += (Math.abs(cb1 - cb2) + Math.abs(cr1 - cr2)) * 0.5;
+      n++;
+    }
+    return { luma: luma / n, chroma: chroma / n, ratio: (chroma / n) / Math.max(luma / n, 1e-6) };
+  }
+
+  function blockinessOf(srcCanvas) {
+    const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+    const e = VUCore.createEngine(cv);
+    e.upload(srcCanvas);
+    let b = null;
+    try { b = e.measureGrid(); } catch (_) {}
+    e.dispose();
+    return b ? b.blockiness : NaN;
+  }
+
+  // Build the ladder of sources: pristine, five JPEG levels, and the real rip.
+  const cleanCv = toCanvas(clean, W, H);
+  const sources = [['clean', cleanCv]];
+  for (const q of [0.6, 0.35, 0.2, 0.12, 0.06]) {
+    sources.push([`jpeg-q${q}`, await crush(cleanCv, q)]);
+  }
+  sources.push(['lowbitrate.png', toCanvas(rip, W, H)]);
+
+  const STAGES = [
+    ['denoise', [0, 0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0]],
+    ['deband',  [0, 0.15, 0.3, 0.45, 0.6, 0.75, 1.0]],
+    ['chroma',  [0, 0.2, 0.4, 0.6, 0.85, 1.0]],
+  ];
+
+  say('# stage  source  blockiness  best_value  psnr_at_best  psnr_at_zero  gain_dB');
+  for (const [name, src] of sources) {
+    const bl = blockinessOf(src);
+    const ce = chromaErrorOf(src);
+    say(`SRC ${name} blockiness=${bl.toFixed(3)} lumaErr=${ce.luma.toFixed(3)} ` +
+        `chromaErr=${ce.chroma.toFixed(3)} chroma/luma=${ce.ratio.toFixed(3)}`);
+    const base = psnr(render(src, {}));
+    for (const [stage, values] of STAGES) {
+      let best = null, bestDet = null;
+      const row = [], rowSplit = [];
+      const base_d = psnrWhere(render(src, {}), 2), base_f = psnrWhere(render(src, {}), 1);
+      for (const v of values) {
+        const out = render(src, { [stage]: v });
+        const p = psnr(out);
+        const pd = psnrWhere(out, 2), pf = psnrWhere(out, 1);
+        row.push(`${v}:${p.toFixed(3)}`);
+        rowSplit.push(`${v}:det${(pd - base_d >= 0 ? '+' : '')}${(pd - base_d).toFixed(3)}` +
+                      `/flat${(pf - base_f >= 0 ? '+' : '')}${(pf - base_f).toFixed(3)}`);
+        if (!best || p > best.p) best = { v, p };
+        // The honest optimum: the largest value that does not DAMAGE detail.
+        if (pd - base_d >= -0.02) bestDet = { v, p, pd: pd - base_d, pf: pf - base_f };
+      }
+      say(`DATA ${stage} ${name} ${bl.toFixed(3)} ${best.v} ` +
+          `${best.p.toFixed(3)} ${base.toFixed(3)} ${(best.p - base).toFixed(3)}` +
+          ` | detail_safe_best=${bestDet ? bestDet.v : 'none'}`);
+      say(`  curve ${stage} ${name}  ${row.join('  ')}`);
+      say(`  split ${stage} ${name}  ${rowSplit.join('  ')}`);
+    }
+  }
+  say('DONE');
+  document.title = 'done';
+})().catch(e => { say('ERROR ' + (e && e.stack || e)); document.title = 'done'; });
+</script>

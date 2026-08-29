@@ -297,6 +297,36 @@ video.srcObject = src.captureStream(30);
             `1.312 -> 1.570, undoing the restore stage entirely`);
     }
 
+    // Denoise is auto-tuned off the same measurement. Its calibration points
+    // come from tools/sweep-auto.py, scored NOT by a single PSNR number — which
+    // rises monotonically to 1.0 on every compressed source and would have
+    // shipped a blur — but by PSNR split on ground-truth detail level.
+    {
+      const d = window.__VU__.autoDenoise;
+      const pts = [
+        ['clean plate',   1.057, 0.00, 0.05],
+        ['JPEG q=0.6',    1.456, 0.60, 0.10],
+        ['JPEG q=0.35',   1.757, 0.80, 0.10],
+        ['JPEG q=0.2',    2.166, 1.00, 0.05],
+        ['crf45 rip',     2.234, 1.00, 0.05],
+        ['JPEG q=0.12',   2.817, 1.00, 0.05],
+      ];
+      const got = pts.map(([n, b, want, tol]) => ({ n, b, want, tol, v: d(b) }));
+      check('auto denoise lands on the detail-safe optimum for every source tested',
+            got.every((g) => Math.abs(g.v - g.want) <= g.tol),
+            got.map((g) => `${g.n}: ${g.v.toFixed(2)} vs ${g.want}`).join('  ·  '));
+      // The load-bearing half: a clean source must get NOTHING. Denoise on a
+      // clean plate measured -15.6 dB on detailed pixels and -5.9 dB on flat
+      // ones at full strength — it damages both halves, which is what a blur
+      // does and what makes the compressed-source result trustworthy.
+      check('auto denoise is off on a clean source and monotone in blockiness',
+            d(1.10) === 0 && d(1.057) === 0 && d(1.0) === 0 &&
+            d(1.5) > d(1.2) && d(2.2) > d(1.5) && d(3.0) <= 1 && d(9.0) === 1,
+            `1.00->${d(1.0).toFixed(2)}  1.20->${d(1.2).toFixed(2)}  ` +
+            `1.50->${d(1.5).toFixed(2)}  2.20->${d(2.2).toFixed(2)}  ` +
+            `9.00->${d(9.0).toFixed(2)}`);
+    }
+
     check('auto strength is monotone and does nothing to a clean source',
           f(1.0) === 0 && f(1.15) === 0 && f(1.5) < f(2.0) && f(2.0) < f(3.0) && f(9) <= 0.9,
           `1.0->${f(1.0).toFixed(2)}  1.5->${f(1.5).toFixed(2)}  ` +

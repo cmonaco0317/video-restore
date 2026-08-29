@@ -2,7 +2,7 @@
   "_README": "This file is the project's verification ledger. Claims record what is believed true about this project AND the command that proves it. Do not delete or reword claims to make them pass, and never hand-edit a status to 'passing' -- only `ledger run` may do that. If a claim is obsolete, mark it retired with `ledger retire`, which preserves it.",
   "project": "video-upscaler",
   "created": "2026-08-05T02:10:54+00:00",
-  "updated": "2026-08-29T22:45:17+00:00",
+  "updated": "2026-08-29T22:53:35+00:00",
   "claims": [
     {
       "id": "pkg-loadable",
@@ -403,6 +403,20 @@
       "last_verified": "2026-08-29T22:45:04+00:00",
       "exit_code": 0,
       "evidence": "...(truncated)...\nhe governor\nPASS  the panel exposes exactly one input, and it is A/B split\n        inputs: split\nPASS  no preset / mode / upscaler / neural pickers remain in the panel\n        0 picker control(s) still present\nPASS  ships the measured-dominant configuration, with adaptation on\n        preset=rescue adaptive=true autoRestore=true\nPASS  leaving Max turns adaptation back off\nPASS  toggle off removes overlay, panel and inline filters\n        parent position restored: \"(none)\"\nPASS  manual invoke re-attaches and opens the panel\n\n=== WebGPU compute path (test/webgpu.html) ===\nrunning\u2026\nPASS  WebGPU is available to test at all\n        navigator.gpu present\nPASS    [diagnostic] adapter\n        apple / metal-3 \u00b7 shader-f16 yes \u00b7 workgroup storage 32768 bytes\nPASS    [diagnostic] WebGPU vs PyTorch\n        interior mean 0.0295/255 max 0.226/255  |  border mean 0.0179/255 max 0.239/255\nPASS  the WebGPU port computes the same thing as PyTorch (f16 tolerance)\n        interior mean 0.0295/255 max 0.226/255, border mean 0.0179/255 max 0.239/255 \u2014 f16 drift is expected, a transposed kernel is not\n\n\u001b[32m112 passed, 0 failed, 1 skipped\u001b[0m\n\u001b[2mSKIP = not measurable headlessly; see the detail line.\u001b[0m",
+      "notes": "",
+      "slow": false,
+      "needs": []
+    },
+    {
+      "id": "auto-denoise-fitted-on-detail-split",
+      "claim": "denoise is auto-tuned from the source's measured blockiness rather than fixed, and the curve was fitted on a metric that cannot be fooled by blurring: across a ladder of JPEG degradations plus the real rip it lands on the detail-safe optimum within 0.02 (clean 1.06 -> 0, q0.6 1.46 -> 0.6, q0.35 1.76 -> 0.8, q0.2 2.17 -> 1.0, rip 2.23 -> 1.0). A single PSNR number was NOT sufficient and would have shipped a blur: it rises monotonically to full strength on every compressed source and never turns over. Splitting the score by how much detail the GROUND TRUTH carries at each pixel settles it \u2014 on a clean plate denoise damages BOTH halves (-15.6 dB detailed, -5.9 dB flat at full strength, the signature of a blur) while on a compressed source BOTH halves improve (q0.2 at full: +0.264 dB detailed, +0.763 dB flat), which a blur cannot do. The split is defined on the clean original so it shares no null space with the filter being tuned",
+      "verify": "python3 test/run.py",
+      "cwd": ".",
+      "status": "passing",
+      "last_run": "2026-08-29T22:53:21+00:00",
+      "last_verified": "2026-08-29T22:53:21+00:00",
+      "exit_code": 0,
+      "evidence": "...(truncated)...\n still \u00d71.05 two clean windows after backing off\nPASS  governor climbs again once frames stay clean\n        1.05 -> 1.15 after four clean windows (~8s)\nPASS  governor stops at the visible-pixel ceiling, not the GPU limit\n        settles at \u00d71.25 after 40 clean windows (ceiling 1.25)\nPASS  no manual Render x control exists to override the governor\nPASS  the panel exposes exactly one input, and it is A/B split\n        inputs: split\nPASS  no preset / mode / upscaler / neural pickers remain in the panel\n        0 picker control(s) still present\nPASS  ships the measured-dominant configuration, with adaptation on\n        preset=rescue adaptive=true autoRestore=true\nPASS  leaving Max turns adaptation back off\nPASS  toggle off removes overlay, panel and inline filters\n        parent position restored: \"(none)\"\nPASS  manual invoke re-attaches and opens the panel\n\n=== WebGPU compute path (test/webgpu.html) ===\nrunning\u2026\nPASS  WebGPU is available to test at all\n        navigator.gpu present\nPASS    [diagnostic] adapter\n        apple / metal-3 \u00b7 shader-f16 yes \u00b7 workgroup storage 32768 bytes\n\n\u001b[32m112 passed, 0 failed, 1 skipped\u001b[0m\n\u001b[2mSKIP = not measurable headlessly; see the detail line.\u001b[0m",
       "notes": "",
       "slow": false,
       "needs": []
