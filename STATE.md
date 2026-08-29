@@ -10,7 +10,7 @@ truth; this prose is one session's account.**
 ```bash
 cd "$HOME/Desktop/AI Projects/video-upscaler"
 ledger status
-python3 test/run.py          # ~109-111 passed, 0 failed as of 2026-08-29
+python3 test/run.py          # ~127-129 passed, 0 failed as of 2026-08-29
                              # (the count wobbles by 2: test/webgpu.html races the
                              #  headless runner's virtual clock during GPU init. It
                              #  never FAILS - one check is emitted synchronously so
@@ -63,23 +63,39 @@ does NOT always survive it — hardware overlay planes and protected pipelines a
 why some screen recordings come out black, and compositing a canvas into the page
 is precisely the design that avoids it.
 
-**Still unproven, genuinely needs hardware:**
+**Still unproven — one needs hardware, one needs a human at a browser:**
 - `output-paths-external-display` — HDMI and AirPlay mirroring, plus the case
   where the player's own native AirPlay button is used and the upscale should be
   correctly ABSENT. This machine has one built-in display (`system_profiler`
   says Connection Type: Internal) and no AirPlay receivers were discoverable, so
   it cannot be tested here. Both consume the same composite the screenshare test
   just proved, which is strong evidence but not proof.
-- `invocation-paths` — context menu, per-site auto-run, ON badge. **Still
-  completely untested, and one attempt suggests it may be broken.** The
-  screenshare probe first tried the real thing — extension loaded unpacked into a
-  throwaway profile, `Cmd+Shift+U` sent via System Events — and *nothing
-  happened*: no panel, no change in the capture. That is not evidence the
-  shortcut is broken (the fixture was a black frame at the time, the keystroke
-  may have needed Accessibility permission, and the extension's own black-frame
-  probe demotes after three strikes), but it is a reason to test this properly
-  rather than assume. The probe now loads `content.js` directly from the page,
-  which exercises the RENDERING path and says nothing at all about injection.
+- `invocation-in-real-chrome` — **split out of `invocation-paths` on 2026-08-29,
+  the same way `output-paths` was split, and the wiring two-thirds is now PROVEN.**
+  ✅ `invocation-wiring` (15 checks, `test/background.html`) drives background.js
+  against a mock `chrome.*` API and covers every decision it makes: all eight
+  listeners registered · both menu items built with the right titles on video AND
+  page AND frame, cleared first so a restart cannot duplicate them · the menu item
+  injecting into the clicked tab with the `__VU_MANUAL__` mark landing BEFORE
+  content.js · "Always upscale on this site" carrying the origin to the options
+  page · icon and Cmd+Shift+U reaching the same inject path · the cross-origin
+  fallback · per-site auto-run registering a persistent script with the broad
+  `*://*/*` grant excluded · revocation tearing it down · a newly-allowed site
+  catching up tabs already open · and the ON badge setting, clearing, and ignoring
+  a message with no sender tab.
+
+  ⭐ **So the earlier "it may be broken" worry is NOT a wiring bug.** Every
+  decision background.js makes is correct. What remains unproven is the browser
+  integration itself — that Chrome loads the thing and delivers those events.
+
+  🔴 **And that genuinely cannot be automated on this machine.** Chrome 151
+  ignores `--load-extension` from the command line. Verified the long way:
+  headless AND headful, with `--disable-features=DisableLoadExtensionCommandLine
+  Switch`, and with `extensions.ui.developer_mode` pre-seeded into a fresh
+  profile. The extension never registers, never appears in
+  `chrome://extensions-internals`, and its service worker
+  (`gedkemfjoggelefeojfhfglfmiajjpcg`) never becomes a CDP target, while Chrome's
+  own component extensions do. Do not spend another session on the flag.
 
 ---
 

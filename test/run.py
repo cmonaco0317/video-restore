@@ -28,6 +28,10 @@ CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 PAGES = [
     ("GPU pipeline", "test/harness.html"),
     ("DOM integration", "test/integration.html"),
+    # The service worker's wiring — the three ways INTO the extension. Runs
+    # against a mock chrome.* API; the real-browser half is a manual claim,
+    # because Chrome 151 no longer honours --load-extension.
+    ("service worker wiring", "test/background.html"),
     # Skips itself when WebGPU is absent, which it is under this runner's
     # software rasteriser. Its timings are only meaningful in a real window --
     # same caveat as the perf benchmark.

@@ -2,7 +2,7 @@
   "_README": "This file is the project's verification ledger. Claims record what is believed true about this project AND the command that proves it. Do not delete or reword claims to make them pass, and never hand-edit a status to 'passing' -- only `ledger run` may do that. If a claim is obsolete, mark it retired with `ledger retire`, which preserves it.",
   "project": "video-upscaler",
   "created": "2026-08-05T02:10:54+00:00",
-  "updated": "2026-08-29T22:57:03+00:00",
+  "updated": "2026-08-29T23:03:56+00:00",
   "claims": [
     {
       "id": "pkg-loadable",
@@ -72,9 +72,10 @@
       "last_verified": null,
       "exit_code": null,
       "evidence": null,
-      "notes": "",
+      "notes": "retired: split, the same way output-paths was: the WIRING half is fully testable here and is now an automated claim (invocation-wiring), while actually loading the extension into a browser stays manual (invocation-in-real-chrome) because Chrome 151 no longer honours --load-extension from the command line. Keeping it as one indivisible claim left the testable two-thirds unproven for the whole project",
       "slow": false,
-      "needs": []
+      "needs": [],
+      "retired": "2026-08-29T23:03:38+00:00"
     },
     {
       "id": "neural-upscaler",
@@ -417,6 +418,34 @@
       "last_verified": "2026-08-29T22:56:50+00:00",
       "exit_code": 0,
       "evidence": "...(truncated)...\nhe governor\nPASS  the panel exposes exactly one input, and it is A/B split\n        inputs: split\nPASS  no preset / mode / upscaler / neural pickers remain in the panel\n        0 picker control(s) still present\nPASS  ships the measured-dominant configuration, with adaptation on\n        preset=rescue adaptive=true autoRestore=true\nPASS  leaving Max turns adaptation back off\nPASS  toggle off removes overlay, panel and inline filters\n        parent position restored: \"(none)\"\nPASS  manual invoke re-attaches and opens the panel\n\n=== WebGPU compute path (test/webgpu.html) ===\nrunning\u2026\nPASS  WebGPU is available to test at all\n        navigator.gpu present\nPASS    [diagnostic] adapter\n        apple / metal-3 \u00b7 shader-f16 yes \u00b7 workgroup storage 32768 bytes\nPASS    [diagnostic] WebGPU vs PyTorch\n        interior mean 0.0295/255 max 0.226/255  |  border mean 0.0179/255 max 0.239/255\nPASS  the WebGPU port computes the same thing as PyTorch (f16 tolerance)\n        interior mean 0.0295/255 max 0.226/255, border mean 0.0179/255 max 0.239/255 \u2014 f16 drift is expected, a transposed kernel is not\n\n\u001b[32m114 passed, 0 failed, 1 skipped\u001b[0m\n\u001b[2mSKIP = not measurable headlessly; see the detail line.\u001b[0m",
+      "notes": "",
+      "slow": false,
+      "needs": []
+    },
+    {
+      "id": "invocation-wiring",
+      "claim": "the service worker's three ways IN are wired correctly, tested against a mock chrome.* API: it registers all eight listeners it advertises; installing or restarting builds both context-menu items with the right titles on video AND page AND frame, clearing them first so a restart cannot duplicate them; 'Upscale video on this page' injects into the clicked tab and lands the __VU_MANUAL__ mark BEFORE content.js (so the panel knows it was deliberate and does not start collapsed as an auto-run would); 'Always upscale on this site' opens the options page carrying the page's ORIGIN; the toolbar icon and Cmd+Shift+U both reach the same inject path, the keyboard one via tabs.query for the active tab, and an unrelated command is ignored; a cross-origin frame it cannot reach falls back to the top frame rather than giving up; an allowed site registers a persistent document_idle content script that runs with no invoking, with the broad '*://*/*' grant excluded so auto-run stays per-site; revoking the last site unregisters it; allowing a site injects into tabs ALREADY open on it, since registration only affects future navigations; and the toolbar badge reads ON while active, clears when off, and ignores a state message with no sender tab. This proves every DECISION background.js makes - it does not prove the browser delivers those events, which is invocation-in-real-chrome",
+      "verify": "python3 test/run.py",
+      "cwd": ".",
+      "status": "passing",
+      "last_run": "2026-08-29T23:03:42+00:00",
+      "last_verified": "2026-08-29T23:03:42+00:00",
+      "exit_code": 0,
+      "evidence": "...(truncated)...\nch falls back to the top frame instead of giving up\n        3 attempts, 2 without allFrames\nPASS  an allowed site gets a registered content script that runs with NO invoking\n        id=vu-auto matches=https://www.youtube.com/* runAt=document_idle\nPASS  the broad \u201call sites\u201d grant is excluded \u2014 auto-run is per-site only\n        https://www.youtube.com/*\nPASS  removing the last allowed site unregisters the auto-run script\n        0 script(s) still registered\nPASS  allowing a site injects into tabs ALREADY open on it, not just future loads\n        1 executeScript call(s) after the grant \u2014 registering a content script only affects future navigations, so this is the catch-up\nPASS  the toolbar badge shows ON while active and clears when it is turned off\n        on -> \"ON\"   off -> \"\"\nPASS  a state message from a non-tab context is ignored rather than throwing\n\n=== WebGPU compute path (test/webgpu.html) ===\nrunning\u2026\nPASS  WebGPU is available to test at all\n        navigator.gpu present\nPASS    [diagnostic] adapter\n        apple / metal-3 \u00b7 shader-f16 yes \u00b7 workgroup storage 32768 bytes\n\n\u001b[32m127 passed, 0 failed, 1 skipped\u001b[0m\n\u001b[2mSKIP = not measurable headlessly; see the detail line.\u001b[0m",
+      "notes": "",
+      "slow": false,
+      "needs": []
+    },
+    {
+      "id": "invocation-in-real-chrome",
+      "claim": "loaded unpacked into a real Chrome, the extension actually starts and its entry points work as a user meets them: right-clicking a video shows 'Upscale video on this page' and clicking it turns the upscaler on, a site added in the options page auto-runs on a fresh load with nothing clicked, the pinned toolbar icon shows the blue ON badge while active, and Cmd+Shift+U toggles. NOT AUTOMATABLE ON THIS MACHINE: Chrome 151 ignores --load-extension from the command line (verified headless and headful, with --disable-features=DisableLoadExtensionCommandLineSwitch and with developer_mode pre-seeded into the profile - the extension never appears in chrome://extensions-internals and its service worker never becomes a CDP target). The wiring behind every one of these is covered by invocation-wiring; what is unproven is the browser integration itself",
+      "verify": null,
+      "cwd": ".",
+      "status": "manual",
+      "last_run": null,
+      "last_verified": null,
+      "exit_code": null,
+      "evidence": null,
       "notes": "",
       "slow": false,
       "needs": []

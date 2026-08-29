@@ -1,0 +1,278 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Video Upscaler — service worker wiring</title>
+<!-- The three ways INTO the extension — context menu, per-site auto-run, toolbar
+     badge — had never been tested by anything. `pkg-loadable` only proves the
+     manifest parses and the files exist; it has never loaded this into a Chrome.
+     And one attempt to drive Cmd+Shift+U in a throwaway profile produced nothing
+     at all, which is the kind of silence a wiring bug makes.
+
+     This exercises background.js against a mock chrome.* API: the listeners it
+     registers, what they do when fired, and the arguments they pass on. It is
+     NOT a substitute for loading the extension in a real browser — see
+     `invocation-in-real-chrome`, which stays manual because Chrome 151 no longer
+     honours --load-extension from the command line. What it does cover is every
+     decision background.js makes, which is where a silent failure would live. -->
+<style>body{background:#0d1018;color:#dfe6ef;font:13px/1.6 -apple-system,sans-serif;margin:24px}
+h1{font-size:15px;margin:0 0 14px}
+pre{background:#151a26;border:1px solid #232b3d;border-radius:8px;padding:12px;white-space:pre-wrap}
+.ok{color:#3ddc97}.bad{color:#ff6b6b}</style>
+<h1>Video Upscaler — service worker wiring</h1>
+<pre id="log">running…</pre>
+
+<script>
+const results = [];
+function check(name, pass, detail) {
+  results.push({ name, pass: !!pass, detail: detail ?? '' });
+  document.getElementById('log').innerHTML = results.map(r =>
+    `<span class="${r.pass ? 'ok' : 'bad'}">${r.pass ? 'PASS' : 'FAIL'}</span>  ${r.name}` +
+    (r.detail ? `\n        ${r.detail}` : '')).join('\n');
+}
+
+// --- the mock -------------------------------------------------------------
+// Every listener background.js registers is captured so the test can fire it,
+// and every outbound call is recorded so the test can assert its arguments.
+const calls = [];
+const L = {};                                   // captured listeners by path
+const ev = (path) => ({ addListener: (fn) => { (L[path] = L[path] || []).push(fn); } });
+const rec = (name, fn) => (...a) => { calls.push({ name, args: a }); return fn ? fn(...a) : undefined; };
+
+let permissionsAll = { origins: [], permissions: [] };
+let registered = [];                            // content scripts currently registered
+let executeScriptImpl = async () => [{ result: null }];
+
+globalThis.importScripts = () => {};            // worker-only API; source-probe is loaded below
+globalThis.chrome = {
+  action: {
+    onClicked: ev('action.onClicked'),
+    setBadgeText: rec('action.setBadgeText'),
+    setBadgeBackgroundColor: rec('action.setBadgeBackgroundColor'),
+  },
+  commands: { onCommand: ev('commands.onCommand') },
+  contextMenus: {
+    onClicked: ev('contextMenus.onClicked'),
+    removeAll: rec('contextMenus.removeAll', (cb) => cb && cb()),
+    create: rec('contextMenus.create'),
+  },
+  runtime: {
+    onInstalled: ev('runtime.onInstalled'),
+    onStartup: ev('runtime.onStartup'),
+    onMessage: ev('runtime.onMessage'),
+    getURL: (p) => 'chrome-extension://TESTID/' + p,
+  },
+  tabs: {
+    query: rec('tabs.query', async () => [{ id: 42 }]),
+    create: rec('tabs.create'),
+  },
+  scripting: {
+    executeScript: rec('scripting.executeScript', (...a) => executeScriptImpl(...a)),
+    getRegisteredContentScripts: rec('scripting.getRegisteredContentScripts',
+      async ({ ids }) => registered.filter(r => ids.includes(r.id))),
+    registerContentScripts: rec('scripting.registerContentScripts',
+      async (arr) => { registered = registered.concat(arr); }),
+    unregisterContentScripts: rec('scripting.unregisterContentScripts',
+      async ({ ids }) => { registered = registered.filter(r => !ids.includes(r.id)); }),
+  },
+  permissions: {
+    getAll: rec('permissions.getAll', async () => permissionsAll),
+    onAdded: ev('permissions.onAdded'),
+    onRemoved: ev('permissions.onRemoved'),
+  },
+};
+const fire = (path, ...a) => Promise.all((L[path] || []).map(fn => fn(...a)));
+const since = () => { const n = calls.length; return () => calls.slice(n); };
+const wait = (ms) => new Promise(r => setTimeout(r, ms));
+</script>
+<script src="../source-probe.js"></script>
+<script src="../background.js"></script>
+<script>
+(async () => {
+  const FILES = ['cnn-weights.js', 'core.js', 'content.js'];
+
+  // --- listeners are registered at all ------------------------------------
+  check('the worker registers every entry point it advertises',
+        (L['action.onClicked'] || []).length === 1 &&
+        (L['commands.onCommand'] || []).length === 1 &&
+        (L['contextMenus.onClicked'] || []).length === 1 &&
+        (L['runtime.onInstalled'] || []).length === 1 &&
+        (L['runtime.onStartup'] || []).length === 1 &&
+        (L['permissions.onAdded'] || []).length === 1 &&
+        (L['permissions.onRemoved'] || []).length === 1 &&
+        (L['runtime.onMessage'] || []).length === 2,
+        `action=${(L['action.onClicked']||[]).length} command=${(L['commands.onCommand']||[]).length} ` +
+        `menu=${(L['contextMenus.onClicked']||[]).length} onMessage=${(L['runtime.onMessage']||[]).length}`);
+
+  // --- context menu items -------------------------------------------------
+  {
+    const get = since();
+    await fire('runtime.onInstalled');
+    await wait(20);
+    const created = get().filter(c => c.name === 'contextMenus.create').map(c => c.args[0]);
+    const toggle = created.find(c => c.id === 'vu-toggle');
+    const always = created.find(c => c.id === 'vu-always');
+    check('installing builds both context-menu items, on video AND page AND frame',
+          created.length === 2 && toggle && always &&
+          toggle.title === 'Upscale video on this page' &&
+          always.title === 'Always upscale on this site…' &&
+          ['video', 'page', 'frame'].every(c => toggle.contexts.includes(c)) &&
+          ['video', 'page', 'frame'].every(c => always.contexts.includes(c)),
+          created.map(c => `${c.id}:"${c.title}" [${(c.contexts||[]).join(',')}]`).join('  ·  '));
+    // removeAll first, or a second onInstalled/onStartup throws duplicate-id and
+    // the menu silently stops being rebuilt.
+    check('menus are cleared before being rebuilt, so a restart cannot duplicate them',
+          get().findIndex(c => c.name === 'contextMenus.removeAll') <
+          get().findIndex(c => c.name === 'contextMenus.create'));
+  }
+
+  // --- "Upscale video on this page" injects -------------------------------
+  {
+    const get = since();
+    await fire('contextMenus.onClicked', { menuItemId: 'vu-toggle' }, { id: 7 });
+    await wait(20);
+    const ex = get().filter(c => c.name === 'scripting.executeScript').map(c => c.args[0]);
+    check('the context-menu item actually injects into the clicked tab',
+          ex.length === 2 && ex.every(e => e.target.tabId === 7) &&
+          typeof ex[0].func === 'function' &&
+          JSON.stringify(ex[1].files) === JSON.stringify(FILES),
+          ex.map(e => e.files ? `files=${e.files.join(',')}` : 'func=mark').join('  then  '));
+    // The mark must land BEFORE content.js, or the panel does not know this was
+    // a deliberate invocation and starts collapsed as if it had auto-run.
+    check('the manual-invoke mark is injected BEFORE the content script, not after',
+          ex.length === 2 && typeof ex[0].func === 'function' && !!ex[1].files &&
+          /__VU_MANUAL__/.test(String(ex[0].func)),
+          String(ex[0].func || '').slice(0, 80));
+  }
+
+  // --- "Always upscale on this site…" opens the options page --------------
+  {
+    const get = since();
+    await fire('contextMenus.onClicked',
+               { menuItemId: 'vu-always', pageUrl: 'https://www.youtube.com/watch?v=abc' },
+               { id: 7 });
+    await wait(20);
+    const t = get().find(c => c.name === 'tabs.create');
+    check('“Always upscale on this site” opens the options page carrying the ORIGIN',
+          !!t && /options\.html\?add=/.test(t.args[0].url) &&
+          decodeURIComponent(t.args[0].url.split('add=')[1]) === 'https://www.youtube.com',
+          t ? t.args[0].url : 'tabs.create never called');
+  }
+
+  // --- toolbar click and keyboard command take the same path --------------
+  {
+    let get = since();
+    await fire('action.onClicked', { id: 11 });
+    await wait(20);
+    const fromIcon = get().filter(c => c.name === 'scripting.executeScript');
+    get = since();
+    await fire('commands.onCommand', 'toggle');
+    await wait(30);
+    const fromKey = get().filter(c => c.name === 'scripting.executeScript');
+    check('the toolbar icon and Cmd+Shift+U both inject (the keyboard path asks for the active tab)',
+          fromIcon.length === 2 && fromIcon[0].args[0].target.tabId === 11 &&
+          fromKey.length === 2 && fromKey[0].args[0].target.tabId === 42,
+          `icon->tab ${fromIcon[0] && fromIcon[0].args[0].target.tabId}  ·  ` +
+          `key->tab ${fromKey[0] && fromKey[0].args[0].target.tabId} (from tabs.query)`);
+    // An unknown command must not inject.
+    get = since();
+    await fire('commands.onCommand', 'something-else');
+    await wait(20);
+    check('an unrelated keyboard command is ignored',
+          get().filter(c => c.name === 'scripting.executeScript').length === 0);
+  }
+
+  // --- cross-origin iframe fallback ---------------------------------------
+  {
+    let attempt = 0;
+    executeScriptImpl = async (opts) => {
+      attempt++;
+      if (opts.target.allFrames) throw new Error('Cannot access contents of a cross-origin frame');
+      return [{ result: null }];
+    };
+    const get = since();
+    await fire('action.onClicked', { id: 13 });
+    await wait(30);
+    const ex = get().filter(c => c.name === 'scripting.executeScript').map(c => c.args[0]);
+    const retried = ex.filter(e => !e.target.allFrames);
+    check('a frame it cannot reach falls back to the top frame instead of giving up',
+          ex.some(e => e.target.allFrames) && retried.length === 2 &&
+          JSON.stringify(retried[1].files) === JSON.stringify(FILES),
+          `${ex.length} attempts, ${retried.length} without allFrames`);
+    executeScriptImpl = async () => [{ result: null }];
+  }
+
+  // --- per-site auto-run ---------------------------------------------------
+  {
+    permissionsAll = { origins: ['https://www.youtube.com/*', '*://*/*'], permissions: [] };
+    registered = [];
+    const get = since();
+    await fire('runtime.onStartup');
+    await wait(30);
+    const reg = get().find(c => c.name === 'scripting.registerContentScripts');
+    const spec = reg && reg.args[0][0];
+    check('an allowed site gets a registered content script that runs with NO invoking',
+          !!spec && spec.id === 'vu-auto' &&
+          JSON.stringify(spec.js) === JSON.stringify(FILES) &&
+          spec.runAt === 'document_idle' && spec.allFrames === true &&
+          spec.persistAcrossSessions === true,
+          spec ? `id=${spec.id} matches=${spec.matches.join(',')} runAt=${spec.runAt}` : 'never registered');
+    // The broad optional grant must NOT become an auto-run on every site.
+    check('the broad “all sites” grant is excluded — auto-run is per-site only',
+          !!spec && !spec.matches.includes('*://*/*') &&
+          spec.matches.includes('https://www.youtube.com/*'),
+          spec ? spec.matches.join(', ') : '');
+  }
+
+  // --- revoking a site tears the auto-run back down -----------------------
+  {
+    permissionsAll = { origins: [], permissions: [] };
+    const get = since();
+    await fire('permissions.onRemoved', { origins: ['https://www.youtube.com/*'] });
+    await wait(30);
+    check('removing the last allowed site unregisters the auto-run script',
+          get().some(c => c.name === 'scripting.unregisterContentScripts') &&
+          registered.length === 0,
+          `${registered.length} script(s) still registered`);
+  }
+
+  // --- newly-allowed site catches up an already-open tab ------------------
+  {
+    permissionsAll = { origins: ['https://vimeo.com/*'], permissions: [] };
+    const get = since();
+    await fire('permissions.onAdded', { origins: ['https://vimeo.com/*'] });
+    await wait(40);
+    const injected = get().filter(c => c.name === 'scripting.executeScript');
+    check('allowing a site injects into tabs ALREADY open on it, not just future loads',
+          injected.length >= 1 &&
+          injected.some(c => JSON.stringify(c.args[0].files) === JSON.stringify(FILES)),
+          `${injected.length} executeScript call(s) after the grant — registering a ` +
+          `content script only affects future navigations, so this is the catch-up`);
+  }
+
+  // --- the ON badge --------------------------------------------------------
+  {
+    const send = (L['runtime.onMessage'] || [])[1];
+    let get = since();
+    send({ type: 'vu-state', on: true }, { tab: { id: 5 } }, () => {});
+    await wait(10);
+    const on = get().find(c => c.name === 'action.setBadgeText');
+    get = since();
+    send({ type: 'vu-state', on: false }, { tab: { id: 5 } }, () => {});
+    await wait(10);
+    const off = get().find(c => c.name === 'action.setBadgeText');
+    check('the toolbar badge shows ON while active and clears when it is turned off',
+          on && on.args[0].text === 'ON' && on.args[0].tabId === 5 &&
+          off && off.args[0].text === '' && off.args[0].tabId === 5,
+          `on -> "${on && on.args[0].text}"   off -> "${off && off.args[0].text}"`);
+    // A message with no sender.tab is a message from the options page; badging
+    // there would throw.
+    get = since();
+    send({ type: 'vu-state', on: true }, {}, () => {});
+    await wait(10);
+    check('a state message from a non-tab context is ignored rather than throwing',
+          get().filter(c => c.name === 'action.setBadgeText').length === 0);
+  }
+
+  document.title = 'done';
+})().catch(e => { check('wiring harness completed', false, e && e.stack || String(e));
+                  document.title = 'done'; });
+</script>

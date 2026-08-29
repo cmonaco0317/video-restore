@@ -399,7 +399,7 @@ both harnesses, and exits non-zero on any failure:
 cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 test/run.py
 ```
 
-Current: **106 passed, 0 failed, 1 skipped.** The skip is the perf check, which
+Current: **127 passed, 0 failed, 1 skipped.** The skip is the perf check, which
 headless cannot measure honestly (see below). The count wobbles by two:
 `test/webgpu.html` races the headless runner's virtual clock during GPU init. It
 never *fails* — one check is emitted synchronously, so "produced no checks at
@@ -419,7 +419,7 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 
 `ledger status` in this folder is the machine-checked truth:
 
-**18 active claims: 16 passing, 0 failing, 2 awaiting hardware.**
+**19 active claims: 17 passing, 0 failing, 2 awaiting a human.**
 
 | | claim |
 |---|---|
@@ -440,9 +440,10 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 | PASS | `better-source-verified-live` — verified on a real 4K YouTube video |
 | PASS | **`output-paths-screenshare`** — **proven**: the picture reaches an OS screen capture |
 | **MANL** | `output-paths-external-display` — **unproven, needs HDMI / an AirPlay receiver** |
-| **MANL** | `invocation-paths` — **unproven, needs a real Chrome profile** |
+| PASS | **`invocation-wiring`** — every decision the service worker makes, against a mock `chrome.*` |
+| **MANL** | `invocation-in-real-chrome` — **unproven; Chrome 151 ignores `--load-extension`, so this needs a person** |
 
-Eleven further claims have been **retired** rather than deleted, each with the
+Twelve further claims have been **retired** rather than deleted, each with the
 reason recorded in `LEDGER.json` — mostly figures that were true when measured
 and stopped describing the code once a stage was added. A retired claim is not a
 deleted one; the reason it stopped being true is the interesting part.
@@ -536,12 +537,19 @@ already happened.
 
 **Still not verified anywhere:** behaviour on real Netflix or Twitch pages (the
 DRM fallback is exercised only against a synthetic black-frame source), real
-fullscreen, an actual HDMI cable or AirPlay mirror, and the three invocation
-paths — context menu, per-site auto-run, ON badge. Those last two are the
-`output-paths-external-display` and `invocation-paths` claims sitting unproven,
-and `invocation-paths` is the older worry: one attempt to drive the keyboard
-shortcut in a throwaway profile produced nothing at all, which is not proof it
-is broken but is a reason to test it rather than assume.
+fullscreen, an actual HDMI cable or AirPlay mirror, and the extension running as
+a loaded extension in a browser.
+
+That last one used to read "the three invocation paths are completely untested".
+They are now covered as far as this machine can cover them: `invocation-wiring`
+drives the service worker against a mock `chrome.*` API and checks every decision
+it makes — menu items, the injection order, the origin handed to the options
+page, the per-site auto-run registration and teardown, the cross-origin fallback,
+the ON badge. What is left is whether the browser loads the thing and delivers
+those events, and that is genuinely not automatable here: **Chrome 151 ignores
+`--load-extension` from the command line**, headless or headful, with the feature
+flag re-enabled and developer mode pre-seeded. So `invocation-in-real-chrome`
+stays manual, and it wants a person with a browser rather than a better script.
 
 ## Honest limits
 
@@ -579,6 +587,8 @@ core.js            WebGL2 engine — no chrome.* APIs, so it is testable standal
 content.js         video discovery, overlay geometry, DRM fallback, control panel
 tools/make-icons.py  generates icons/ from scratch, no deps
 test/              harness.html (GPU) · integration.html (DOM)
+                   background.html — the service worker's wiring, against a
+                   mock chrome.* API
                    compare.html / look.html / panel-look.html — serve the folder
                    and open them; the eye checks the numbers cannot make
 ```
