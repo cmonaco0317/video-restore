@@ -10,12 +10,29 @@
  *   A. clean    (source res)  bilateral denoise + deband      [skipped if both 0]
  *   B. upscale  (output res)  FSR-1 EASU, edge-adaptive, 1 pass
  *                             or separable Lanczos-3, 2 passes
- *   C. finish   (output res)  RCAS sharpen + grade + dither
+ *   B2a. flow   (quarter res) Lucas-Kanade sub-pixel motion   [if temporal > 0]
+ *   B2b. temporal (output res) motion-compensated accumulation [if temporal > 0]
+ *   B2c. backproj (output res) iterative back-projection      [auto-gated to 0
+ *                             on compressed sources - see autoBackproject()]
+ *   C. finish   (output res)  local contrast + vibrance + shadow
+ *                             + RCAS sharpen + grade + dither
+ *
+ * Out of band, every GRID_INTERVAL ms rather than per frame:
+ *   measure (source res)      blockiness + transform-grid phase/period, which
+ *                             drive deblock strength AND the back-projection
+ *                             gate. Does a readPixels, so it is deliberately
+ *                             NOT on the per-frame path.
  *
  * Why each piece:
  *  - Restore is the only stage that repairs COMPRESSION damage rather than
  *    scaling damage. On real footage that is the dominant problem, and it must
  *    run before everything else or the rest of the chain amplifies it.
+ *  - Temporal accumulation removes NOISE. It does not add detail, and that was
+ *    measured: aligned real frames (36.056 dB) do not beat copies of a single
+ *    frame (36.253), because the mean of aligned area-samples is another area
+ *    sample. Back-projection is what actually reconstructs (+0.29 dB isolated
+ *    by that same copies-vs-real ablation) - and it MUST stay gated off on
+ *    compressed sources, where it reprints the blocking restore just removed.
  *  - EASU orients its kernel along the local edge, so diagonals stop
  *    staircasing the way a direction-blind kernel like Lanczos leaves them.
  *  - Denoise/deband run at SOURCE resolution: fewer pixels, and cleaning

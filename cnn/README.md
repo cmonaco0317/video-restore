@@ -62,7 +62,7 @@ residual connection and adding depth were both tried; neither helps.
 An earlier **+1.762 dB** was a *validation* figure taken after three runs had
 been compared, i.e. inflated by selection. Never quote it.
 
-## Two things that were measured and rejected
+## One thing that was measured and rejected
 
 **Dihedral augmentation made it worse** — +1.253 dB with vertical flips and 90°
 rotations versus +1.762 dB without (both validation, same conditions). Video is
@@ -70,9 +70,22 @@ not isotropic, and forcing 8-fold symmetry on 1540 parameters spends capacity on
 symmetry rather than content. Horizontal flip only. Do not re-add rotations
 because they "obviously" help; they were tried.
 
-**Motion-compensated temporal was not built.** The chain already costs 11.4 ms of
-the 16.7 ms 60 fps budget, and motion estimation would push it over. It is a
-budget decision, not a difficulty one.
+## …and one that was rejected here and then built anyway
+
+This file used to say *"motion-compensated temporal was not built — the chain
+already costs 11.4 ms of the 16.7 ms budget, and motion estimation would push it
+over."* That was a budget judgement, and it was wrong.
+
+It was built: Lucas-Kanade sub-pixel alignment solved at quarter resolution with
+full-resolution taps, feeding iterative back-projection. Together they cost
+**1.59 ms**, and the shipped chain sits at **10.54 ms** of the 16.7 ms budget —
+so the pass that was declined as unaffordable turned out to fit with 6 ms to
+spare. It is also the only stage in the whole engine that adds information rather
+than redistributing it (+0.29 dB isolated by the copies-vs-real-frames ablation).
+
+The lesson is not "motion estimation is cheap". It is that a cost estimated
+rather than measured is a guess, and this one was out by roughly 4×. See
+`../STATE.md`.
 
 ## Reproduce
 

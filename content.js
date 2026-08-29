@@ -69,11 +69,11 @@
     mode: 'auto',          // auto | gpu | filter
     upscaler: 'fsr',       // fsr (edge-adaptive EASU) | lanczos
     // OFF by default. Measured against a clean original, the trained doubler is
-    // +0.09 dB on a compressed source and -0.25 dB on a clean one versus EASU
-    // alone — i.e. invisible at best, mildly harmful at worst — for ~5 ms of GPU
-    // per frame. The toggle stays because the model is good in isolation
-    // (+1.35 dB vs Lanczos-3 on its own benchmark); it simply does not beat the
-    // classical path that actually ships.
+    // +0.09 dB on a compressed source and -0.11 dB on a clean one versus EASU
+    // alone — i.e. invisible at best, mildly harmful at worst — for 4.52 ms of
+    // GPU per frame. The toggle stays because the model is good in isolation
+    // (+1.278 dB vs Lanczos-3 on its own test split); it simply does not beat
+    // the classical path that actually ships.
     neural: 0,
     preset: 'standard',
     renderScale: 1.0,      // supersample factor on top of device pixels

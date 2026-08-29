@@ -314,16 +314,56 @@ already implemented here) and anti-ringing (measured "a net positive in general"
 
 ## Next, if picked up
 
-1. **Prove `output-paths`** — still the only thing between "built" and "works",
-   and now the oldest unproven thing here by a wide margin.
-2. **Confirm the better-source lever on a real YouTube page.** It is the highest
-   value feature added today and the only one whose live behaviour is unverified.
-   One video, one click on "use it", check the readout reports a higher tier.
-3. **Real multi-frame reconstruction**, if anyone wants to spend the effort:
-   shift-and-add onto the HR grid plus iterative back-projection. The alignment
-   it needs already exists and is verified. This is the only remaining path to
-   genuinely *adding* detail, and the measurement rig to judge it — the
-   copies-versus-real-frames ablation — is already in the suite.
+**All three items that used to sit here are done.** The better-source lever was
+confirmed live on a real 4K YouTube video; multi-frame reconstruction was built
+(back-projection) and is a passing claim; and `output-paths` was split, with the
+screenshare third now proven by `tools/verify-screenshare.py`. What is left:
+
+1. **`invocation-paths` — the oldest unproven thing here, and the one with an
+   actual reason for concern.** Context menu, per-site auto-run, ON badge. One
+   attempt to drive `Cmd+Shift+U` in a throwaway profile produced *nothing* — no
+   panel, no change in the capture. That is not proof it is broken (the fixture
+   was a black frame, the keystroke may have needed Accessibility permission,
+   and the black-frame probe demotes after three strikes), but everything else
+   here has been measured and this has not. Needs a real Chrome profile.
+2. **`output-paths-external-display`** — genuinely needs hardware: an HDMI cable
+   and an AirPlay receiver. Both consume the same composite the screenshare test
+   proved, which is strong evidence, not proof.
+
+### The live design question — a fully automatic upscaler
+
+Carter's direction (2026-08-29): remove the settings entirely and have it adapt
+on its own, marketed as a smart upscaler that adjusts to the scene. **Feasible,
+and about 70% built** — but it splits in two and only one half is automatable:
+
+- **Reconstruction** (deblock, dering, back-projection, grid phase/period, render
+  scale, GPU/filter mode) already auto-tunes off a real measurement, and denoise
+  / deband / chroma could join it. These have ground truth, so "best" is defined.
+- **Look** (detail, vibrance, shadow) **cannot be automated by any metric in this
+  project** — measured: distance-to-truth drives all three monotonically to zero
+  on both clean and compressed sources. An optimiser using the only honest metric
+  here converges on `reference`, which to a normal viewer looks *flatter* than
+  what `max` gives them now. The look is a taste dial, not a measurement.
+
+Two facts that shape the pitch. `rescue` already **beats every other preset on
+every source tested, including a clean one** — so auto cannot honestly be sold as
+"better than picking the right preset"; the right preset is already found. What
+auto buys is that the user never has to know, plus **per-shot** adaptation within
+one video, which no static preset can do and which is **not yet measured**.
+
+Order to build it: (1) ship `rescue` + auto as the only mode and delete the preset
+picker — no new measurement needed; (2) extend auto-tuning to denoise/deband/
+chroma on the existing ground-truth rig; (3) **measure** whether per-shot look
+adaptation beats a fixed look before building it.
+
+🔴 **Two risks worth writing down now.** Parameters that change mid-shot make the
+picture *pump*, and there is **no test in the suite that would catch that** — the
+render-scale governor already needed deliberate hysteresis for the same reason,
+and look controls pump far more visibly. And `measureGrid()` runs only every
+2000 ms because its `readPixels` stalls; reacting at a scene *cut* means making
+that readback async, which is the one piece that could threaten the 10.54 ms
+budget. Also: keep the readout, A/B split and bypass key. "No settings" must not
+become "no way to tell it is working" — that is the uninstall path.
 
 ---
 

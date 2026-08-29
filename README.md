@@ -110,9 +110,18 @@ player's own AirPlay button.**
 
 ## Two modes
 
-**GPU mode** (default where possible) — engine v2, three passes per frame:
+**GPU mode** (default where possible) — eight stages. Several fold into one GPU
+pass and several are skipped when their strength is zero, so a presented frame
+costs 5–7 passes depending on settings:
 
-1. **clean**, at source resolution — edge-preserving bilateral denoise, **deband**
+1. **restore**, at source resolution and **first in the chain** — **deblock** and
+   **dering**, the only stage that repairs damage done by the *encoder* rather
+   than by scaling. It runs before everything else because otherwise the rest of
+   the chain amplifies the artifacts instead of the picture. Its strength, and
+   the transform grid's phase and period, are **measured off the source** rather
+   than assumed. Full detail under [`rescue`](#unless-the-source-is-genuinely-bad-then-pick-rescue)
+   below.
+2. **clean**, at source resolution — edge-preserving bilateral denoise, **deband**
    to dissolve the contour steps low-bitrate gradients break into, and **chroma
    reconstruction**. Video is 4:2:0: colour is stored at quarter resolution, so
    colour edges arrive soft and bleed past the luma edge they belong to. Luma
@@ -120,25 +129,36 @@ player's own AirPlay button.**
    luma (a guided filter — the same idea AV1 calls chroma-from-luma) and colour
    snaps back onto the structure it belongs to. Cleaning before magnification
    beats cleaning after.
-2. **neural 2x luma doubler — OFF by default.** A 1540-parameter CNN trained on
+3. **neural 2x luma doubler — OFF by default.** A 1540-parameter CNN trained on
    live-action video, running as four WebGL2 fragment passes. It beats Lanczos-3
-   by +1.35 dB on its own benchmark, but measured against a clean original it is
-   only **+0.09 dB** on a compressed source and **−0.25 dB** on a clean one
-   versus the EASU path that actually ships — for ~5 ms/frame. It does not earn
-   its cost, so the toggle exists and the default is off. The full story, and
-   why every permissively-licensed alternative is anime-trained, is in
+   by **+1.278 dB** on its own test split, but measured against a clean original
+   it is only **+0.09 dB** on a compressed source and **−0.11 dB** on a clean one
+   versus the EASU path that actually ships — for **4.52 ms/frame**. It does not
+   earn its cost, so the toggle exists and the default is off. The full story,
+   and why every permissively-licensed alternative is anime-trained, is in
    `cnn/README.md`.
-3. **upscale** — **FSR 1.0 EASU**, which orients its kernel along the local edge
+4. **upscale** — **FSR 1.0 EASU**, which orients its kernel along the local edge
    instead of filtering blindly, so diagonals stop staircasing. Separable
    **Lanczos-3** is still selectable in the panel.
-4. **temporal accumulation** — the only stage that recovers real information
-   rather than inferring it. Consecutive frames of the same scene carry slightly
-   different sub-pixel samples, so averaging across time genuinely removes noise
-   and firms up detail. With no motion vectors available it uses neighbourhood
-   clamping: history is clipped to the local colour box of the current frame, so
-   anything that moved is rejected outright. Big gain on static and slow shots,
-   gracefully nothing on fast motion, no ghosting either way.
-5. **local contrast, vibrance and shadow lift** — the perceived-quality layer.
+5. **motion-compensated temporal accumulation** — **removes noise; does not add
+   detail.** Lucas-Kanade optical flow estimates sub-pixel motion (solved at
+   quarter resolution, sampled at full), so history follows the scene instead of
+   being thrown away whenever anything moves — that recovers 77% of what motion
+   was costing. It cuts noise 71% over 24 frames and adopts a hard cut on the
+   very next frame, so it does not ghost. What it does **not** do is add detail,
+   and that was measured rather than assumed: real sub-pixel-shifted frames score
+   36.056 dB where *copies of a single frame* score 36.253. Averaging aligned
+   area-samples cannot deconvolve — the mean of area averages is just another
+   area average.
+6. **back-projection** — **the stage that does add detail.** Instead of averaging,
+   it simulates the camera on the current estimate and corrects it against the
+   pixels actually observed. The copies-vs-real-frames ablation separates the two
+   effects cleanly: **+1.03 dB** of deconvolution (which a still image gets too)
+   plus a further **+0.29 dB** that could only have come from the neighbouring
+   frames. It is **automatically gated off on compressed sources**, and has to
+   be — it pulls toward the observed pixels, so on a blocky source it faithfully
+   reprints the blocking that stage 1 just removed.
+7. **local contrast, vibrance and shadow lift** — the perceived-quality layer.
    Local contrast works at the tens-of-pixels scale (a different thing from
    sharpening, which works at the pixel scale) and is what reads as depth and
    pop; it boosts the band between two cheap downsampled blurs, clamped so it
@@ -146,7 +166,7 @@ player's own AirPlay button.**
    colour barely at all, backing off on skin tones. Shadow lift opens dark scenes
    with a term that vanishes at both ends, so black is never crushed or clipped.
    **These push the image away from what was encoded, on purpose.**
-6. **finish** — **RCAS** sharpening (its limiter is derived from the local
+8. **finish** — **RCAS** sharpening (its limiter is derived from the local
    extremes, so the lobe cannot overshoot into a ring), colour grade, and
    triangular dither.
 
@@ -368,8 +388,11 @@ both harnesses, and exits non-zero on any failure:
 cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 test/run.py
 ```
 
-Current: **55 passed, 0 failed, 1 skipped.** The skip is the perf check, which
-headless cannot measure honestly (see below).
+Current: **106 passed, 0 failed, 1 skipped.** The skip is the perf check, which
+headless cannot measure honestly (see below). The count wobbles by two:
+`test/webgpu.html` races the headless runner's virtual clock during GPU init. It
+never *fails* — one check is emitted synchronously, so "produced no checks at
+all" cannot pass silently.
 
 To watch them run, or to get a real perf number, serve the folder and open the
 pages in a normal Chrome window instead:
@@ -385,20 +408,38 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 
 `ledger status` in this folder is the machine-checked truth:
 
+**16 active claims: 14 passing, 0 failing, 2 awaiting hardware.**
+
 | | claim |
 |---|---|
 | PASS | `pkg-loadable` — valid MV3 package Chrome can load unpacked |
-| PASS | `render-pipeline` — GPU correctness + DOM integration, 55 checks |
-| ATTD | `perf-4k` — 1080p→4K inside a 60 fps budget (vouched, not machine-checked) |
-| **MANL** | `output-paths` — **unproven, needs your hardware** |
+| PASS | `render-pipeline` — GPU correctness + DOM integration |
+| PASS | `perf-budget-reconstruction` — 1080p→4K in 10.54 ms of a 16.7 ms budget |
+| PASS | `no-harm-on-bad-sources` — `max` stays within 1.0 dB of untouched on a crf45 rip |
+| PASS | `restore-removes-compression-damage` — 75% of the excess blocking, with the signature a blur cannot fake |
+| PASS | `restore-measures-the-source` — strength, grid phase and grid period are all measured, not assumed |
+| PASS | `rescue-preset-dominates` — beats the previous best preset on every source, including clean |
+| PASS | `multiframe-reconstruction` — real detail from neighbouring frames, isolated by the copies-vs-real ablation |
+| PASS | `backprojection-gated-on-source-quality` — and it has to be; ungated it reprints the blocking |
+| PASS | `cnn-was-data-limited` — 320→900 frames moved it +1.016→+1.278 dB |
+| PASS | `cnn-architecture-is-not-the-limiter` — four controlled variants; the shipped one won |
+| PASS | `webgpu-does-not-rescue-the-cnn-v2` — 1.11×/1.32×, still doesn't fit |
+| PASS | `better-source-verified-live` — verified on a real 4K YouTube video |
+| PASS | **`output-paths-screenshare`** — **proven**: the picture reaches an OS screen capture |
+| **MANL** | `output-paths-external-display` — **unproven, needs HDMI / an AirPlay receiver** |
 | **MANL** | `invocation-paths` — **unproven, needs a real Chrome profile** |
 
-The two unproven ones are deliberately not marked green. Nothing here has been
-through a real HDMI cable, a real AirPlay mirror, or a real Zoom call; and the
-context menu, per-site auto-run and ON badge only exist inside a real extension
-context, which the headless harness cannot create.
+Eleven further claims have been **retired** rather than deleted, each with the
+reason recorded in `LEDGER.json` — mostly figures that were true when measured
+and stopped describing the code once a stage was added. A retired claim is not a
+deleted one; the reason it stopped being true is the interesting part.
 
-What the checks measured on this Mac (engine v2, 2026-08-04):
+The two remaining unproven ones are deliberately not marked green. Nothing here
+has been through a real HDMI cable or a real AirPlay mirror; and the context
+menu, per-site auto-run and ON badge only exist inside a real extension context,
+which the headless harness cannot create.
+
+What the checks measured on this Mac:
 
 - **EASU is 31% straighter on a diagonal edge than Lanczos** — edge-position RMS
   1.278px → 0.884px across 296 rows. This is the whole reason for the swap.
@@ -429,20 +470,25 @@ What the checks measured on this Mac (engine v2, 2026-08-04):
   2% — and a hard cut is adopted on the very next frame (|Δ| 2.52/255 against a
   clean render), so it does not ghost.
 - **The GLSL port matches PyTorch across the WHOLE frame** — interior mean
-  0.035/255, border mean 0.039/255. Three bugs had to be fixed to get there. The
+  0.0379/255, border mean 0.0214/255. Three bugs had to be fixed to get there. The
   engine uploads flipped, so the CNN's vertical kernel taps had to be negated
   (convolution is not flip-invariant) AND the pixel-shuffle row parity inverted —
   fixing either alone made the error *worse*. Separately the model had to be
   retrained with `padding_mode="replicate"` to match the shader's CLAMP_TO_EDGE
   sampling; with PyTorch's default zero padding the interior looked perfect while
   the border was out by 53.93/255.
-- **1080p → 4K in 11.39 ms/frame with the CNN**, 6.52 ms without: the neural
-  doubler alone costs **4.88 ms**, more than the rest of the chain combined. It
-  fits 60 fps with 1.5x headroom rather than 2.6x, so it is a real trade.
-- **1080p → 4K in 6.40 ms/frame running the classical Vivid chain** — every stage
-  on — which is 2.6× headroom at 60 fps. Temporal costs 1.60 ms of that; chroma
-  reconstruction and the multi-scale base are close to free because they fold
-  into passes that were already running or work at 1/16 resolution.
+- **1080p → 4K in 10.54 ms/frame** with every classical stage on, against a
+  16.7 ms budget — 6.16 ms of headroom. The restore pass costs 1.37 ms of that
+  and optical flow plus back-projection 1.59 ms; chroma reconstruction and the
+  multi-scale base are close to free, because they fold into passes that were
+  already running or work at 1/16 resolution. **With the neural doubler
+  additionally on it is 15.06 ms**, which still fits — the doubler alone costs
+  4.52 ms, and it stays off because +0.09 dB does not earn that, not because it
+  cannot run.
+  *(This figure has been restated four times as stages were added — 3.58 → 6.28
+  → 7.85 → 9.56 → 10.54 ms. Each superseded version is a retired claim in
+  `LEDGER.json` rather than an edit, because a perf number is only meaningful
+  next to the chain it was measured on.)*
 - Deband is honest but modest: longest banding plateau 12.6px → 11.4px (9%,
   averaged over 28 rows), and it leaves dense detail alone (|Δ| 0.020/255 across
   a zone plate). **The dither does most of the debanding**; this pass refines on
@@ -468,24 +514,41 @@ Three caveats on how that was verified, since each one started as a false green:
   headless pane reports a 0×0 layout viewport where every `elementFromPoint`
   returns null.
 
-**Not verified anywhere:** behaviour on real YouTube/Netflix/Twitch pages, in
-real fullscreen, or through an actual HDMI / AirPlay / screenshare path. Those
-need your hardware — that's the `output-paths` claim sitting unproven.
+**Verified since:** the screenshare path is now **proven** — `python3
+tools/verify-screenshare.py` drives a real Chrome window and captures it through
+the OS compositor, the same path Zoom and Meet read. And the better-source lever
+was confirmed on a **real 4K YouTube video**, which is what caught
+`getPlaybackQuality()` lying about the tier for 40+ seconds after the switch had
+already happened.
+
+**Still not verified anywhere:** behaviour on real Netflix or Twitch pages (the
+DRM fallback is exercised only against a synthetic black-frame source), real
+fullscreen, an actual HDMI cable or AirPlay mirror, and the three invocation
+paths — context menu, per-site auto-run, ON badge. Those last two are the
+`output-paths-external-display` and `invocation-paths` claims sitting unproven,
+and `invocation-paths` is the older worry: one attempt to drive the keyboard
+shortcut in a throwaway profile produced nothing at all, which is not proof it
+is broken but is a reason to test it rather than assume.
 
 ## Honest limits
 
 - This is **classical** upscaling — edge-adaptive resampling, adaptive
-  sharpening, denoise, deband, deblock and dering. It is not a neural upscaler. Real-ESRGAN-class models cannot run at 4K60 in a browser;
-  shader-based methods are the realistic ceiling and this is a good one.
-- It cannot add detail that isn't there. On a soft 480p source it will look
-  cleaner and better-defined, not like a 4K master. `rescue` removes the
-  artifacts sitting on top of a bad source; it does not reconstruct what the
-  encoder deleted, and nothing at this speed can.
-- Deblocking assumes the transform grid is 8-aligned from the picture origin,
-  which is true of the MPEG family. AV1 and HEVC also use 4×4 transforms, whose
-  odd boundaries are left alone.
-- It is not a neural upscaler and the trained doubler stays off by default,
-  because it does not beat the classical path for what it costs. Porting the
+  sharpening, denoise, deband, deblock, dering, and multi-frame back-projection.
+  Real-ESRGAN-class models cannot run at 4K60 in a browser; shader-based methods
+  are the realistic ceiling and this is a good one.
+- **It recovers a little real detail, and only a little.** Back-projection
+  genuinely reconstructs from neighbouring frames — the copies-vs-real-frames
+  ablation isolates **+0.29 dB** that could only have come from the other frames.
+  That is a real effect and a small one. It does not reconstruct what the encoder
+  deleted, and nothing at this speed can. On a soft 480p source expect *cleaner
+  and better-defined*, not a 4K master.
+- Deblocking **detects** the transform grid rather than assuming it — phase and
+  period are measured per axis, so a 4×4 transform (AV1, HEVC) and a picture
+  whose grid is offset from the origin are both handled. What it cannot do is
+  filter a grid that has been resampled into non-integer spacing, e.g. a rip
+  that was scaled after encoding.
+- The trained doubler ships but stays **off by default**, because it does not
+  beat the classical path for what it costs. Porting the
   engine to WebGPU compute was measured as a way to afford a bigger model and
   **does not work**: with `shader-f16` and workgroup tiling it runs the shipped
   model 1.11× faster and a 16-filter model 1.32× faster, which still does not
