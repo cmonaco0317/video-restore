@@ -303,10 +303,21 @@ video.srcObject = src.captureStream(30);
     // shipped a blur — but by PSNR split on ground-truth detail level.
     {
       const d = window.__VU__.autoDenoise;
+      // Dense at the high-quality end on purpose: a real 4K YouTube stream reads
+      // about 1.21, and the first version of this curve had NOTHING measured
+      // between 1.06 and 1.46 — so every decision it made about good real-world
+      // content was interpolation. These points close that gap; if the curve is
+      // retuned they must be re-derived from tools/sweep-auto.py, not loosened.
       const pts = [
         ['clean plate',   1.057, 0.00, 0.05],
-        ['JPEG q=0.6',    1.456, 0.60, 0.10],
-        ['JPEG q=0.35',   1.757, 0.80, 0.10],
+        ['JPEG q=0.98',   1.065, 0.00, 0.05],
+        ['JPEG q=0.95',   1.107, 0.20, 0.06],
+        ['JPEG q=0.90',   1.161, 0.30, 0.06],
+        ['JPEG q=0.82',   1.245, 0.45, 0.06],
+        ['JPEG q=0.75',   1.327, 0.45, 0.06],
+        ['JPEG q=0.68',   1.427, 0.60, 0.06],
+        ['JPEG q=0.6',    1.456, 0.60, 0.06],
+        ['JPEG q=0.35',   1.757, 0.80, 0.06],
         ['JPEG q=0.2',    2.166, 1.00, 0.05],
         ['crf45 rip',     2.234, 1.00, 0.05],
         ['JPEG q=0.12',   2.817, 1.00, 0.05],
@@ -320,11 +331,18 @@ video.srcObject = src.captureStream(30);
       // ones at full strength — it damages both halves, which is what a blur
       // does and what makes the compressed-source result trustworthy.
       check('auto denoise is off on a clean source and monotone in blockiness',
-            d(1.10) === 0 && d(1.057) === 0 && d(1.0) === 0 &&
+            d(1.065) === 0 && d(1.057) === 0 && d(1.0) === 0 &&
             d(1.5) > d(1.2) && d(2.2) > d(1.5) && d(3.0) <= 1 && d(9.0) === 1,
             `1.00->${d(1.0).toFixed(2)}  1.20->${d(1.2).toFixed(2)}  ` +
             `1.50->${d(1.5).toFixed(2)}  2.20->${d(2.2).toFixed(2)}  ` +
             `9.00->${d(9.0).toFixed(2)}`);
+      // The value a real 4K YouTube stream actually gets. Carter's 2026-08-29
+      // screenshot read blockiness ~1.21 on live content; this pins what the
+      // curve does there so a retune cannot quietly change real-world behaviour
+      // while still satisfying the fixture points at the extremes.
+      check('a real 4K stream (blockiness ~1.21) gets a modest, detail-safe denoise',
+            d(1.214) > 0.25 && d(1.214) < 0.50,
+            `1.214 -> ${d(1.214).toFixed(3)} (measured optimum near there: 0.45 at 1.245)`);
     }
 
     check('auto strength is monotone and does nothing to a clean source',

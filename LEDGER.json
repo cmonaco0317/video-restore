@@ -2,7 +2,7 @@
   "_README": "This file is the project's verification ledger. Claims record what is believed true about this project AND the command that proves it. Do not delete or reword claims to make them pass, and never hand-edit a status to 'passing' -- only `ledger run` may do that. If a claim is obsolete, mark it retired with `ledger retire`, which preserves it.",
   "project": "video-upscaler",
   "created": "2026-08-05T02:10:54+00:00",
-  "updated": "2026-08-29T23:08:26+00:00",
+  "updated": "2026-08-29T23:20:23+00:00",
   "claims": [
     {
       "id": "pkg-loadable",
@@ -418,9 +418,10 @@
       "last_verified": "2026-08-29T23:07:58+00:00",
       "exit_code": 0,
       "evidence": "...(truncated)...\nch falls back to the top frame instead of giving up\n        3 attempts, 2 without allFrames\nPASS  an allowed site gets a registered content script that runs with NO invoking\n        id=vu-auto matches=https://www.youtube.com/* runAt=document_idle\nPASS  the broad \u201call sites\u201d grant is excluded \u2014 auto-run is per-site only\n        https://www.youtube.com/*\nPASS  removing the last allowed site unregisters the auto-run script\n        0 script(s) still registered\nPASS  allowing a site injects into tabs ALREADY open on it, not just future loads\n        1 executeScript call(s) after the grant \u2014 registering a content script only affects future navigations, so this is the catch-up\nPASS  the toolbar badge shows ON while active and clears when it is turned off\n        on -> \"ON\"   off -> \"\"\nPASS  a state message from a non-tab context is ignored rather than throwing\n\n=== WebGPU compute path (test/webgpu.html) ===\nrunning\u2026\nPASS  WebGPU is available to test at all\n        navigator.gpu present\nPASS    [diagnostic] adapter\n        apple / metal-3 \u00b7 shader-f16 yes \u00b7 workgroup storage 32768 bytes\n\n\u001b[32m127 passed, 0 failed, 1 skipped\u001b[0m\n\u001b[2mSKIP = not measurable headlessly; see the detail line.\u001b[0m",
-      "notes": "",
+      "notes": "retired: quoted a fit calibrated with NOTHING measured between blockiness 1.06 and 1.46, and a real 4K YouTube stream reads ~1.21 \u2014 dead centre of that gap. Every decision the curve made about good real-world content was interpolation between a pristine PNG and a badly crushed one. Densifying the ladder to 13 points moved the curve up by as much as 0.12 in that band and the worst error from 0.118 to 0.043; the old figures no longer describe the code",
       "slow": false,
-      "needs": []
+      "needs": [],
+      "retired": "2026-08-29T23:20:08+00:00"
     },
     {
       "id": "invocation-wiring",
@@ -446,6 +447,49 @@
       "last_verified": null,
       "exit_code": null,
       "evidence": null,
+      "notes": "retired: split again once part of it was actually confirmed: loading and running in a real Chrome is now attested (loads-and-runs-in-real-chrome), while the three entry points Carter did not exercise stay manual (invocation-remaining-paths). Leaving them lumped would have left the whole claim reading unproven when the biggest unknown - whether Chrome loads and runs this at all - had been settled",
+      "slow": false,
+      "needs": [],
+      "retired": "2026-08-29T23:16:47+00:00"
+    },
+    {
+      "id": "loads-and-runs-in-real-chrome",
+      "claim": "loaded unpacked into Carter's real Chrome, the extension starts and the whole automatic pipeline works on live content: on a 4K YouTube video the toolbar-icon path turned it on, the panel rendered legibly and FOLLOWED THE VIDEO INTO FULLSCREEN, and every automatic decision behaved as designed on a source none of the fixtures resemble - it measured the source as clean, set deblock 0.16 and denoise 0.33 from that measurement, opened the back-projection gate ('reconstructing from multiple frames', which only happens on a clean source), climbed the governor to render x1.10, and reported serving 2160p. This is the first evidence that Chrome loads this at all; pkg-loadable only ever proved the manifest parses",
+      "verify": null,
+      "cwd": ".",
+      "status": "attested",
+      "last_run": "2026-08-29T23:16:47+00:00",
+      "last_verified": "2026-08-29T23:16:47+00:00",
+      "exit_code": null,
+      "evidence": "attested by Carter: Screenshot 2026-08-29 of the extension running on a 4K YouTube video ('Alcohol or THC: Which is Worse?', Institute of Human Anatomy) in his own Chrome, loaded unpacked. Panel reads: 3840x2160 -> 3326x1872 - 30 fps - mode EASU + RCAS - render x1.10 - source: clean - deblock 0.16 - denoise 0.33 - 'reconstructing from multiple frames' - serving 2160p. Player is in fullscreen and the panel followed it. Invoked via the TOOLBAR ICON; he did not exercise the context menu, Cmd+Shift+U or per-site auto-run, and did not look at the toolbar badge - those stay in invocation-remaining-paths",
+      "notes": "",
+      "slow": false,
+      "needs": []
+    },
+    {
+      "id": "invocation-remaining-paths",
+      "claim": "the three entry points nobody has yet exercised in a real browser work as a user meets them: right-clicking a video shows 'Upscale video on this page' and clicking it turns the upscaler on; a site added in the options page auto-runs on a fresh load with nothing clicked; and Cmd+Shift+U toggles. Plus the pinned toolbar icon showing a blue ON badge while active. The WIRING behind all four is covered by invocation-wiring and passes; the toolbar-icon path and loading itself are attested in loads-and-runs-in-real-chrome. Cmd+Shift+U is the one worth trying first: an earlier attempt to drive it via System Events produced nothing at all, and that has never been explained",
+      "verify": null,
+      "cwd": ".",
+      "status": "manual",
+      "last_run": null,
+      "last_verified": null,
+      "exit_code": null,
+      "evidence": null,
+      "notes": "",
+      "slow": false,
+      "needs": []
+    },
+    {
+      "id": "auto-denoise-fitted-on-detail-split-v2",
+      "claim": "denoise is auto-tuned from the source's measured blockiness, on a curve fitted across 13 sources spanning pristine to badly crushed, and on a metric that cannot be fooled by blurring. Worst error 0.043 against the detail-safe optimum (clean 1.06 -> 0, q0.95 1.11 -> 0.20, q0.90 1.16 -> 0.30, q0.82 1.25 -> 0.45, q0.68 1.43 -> 0.60, q0.35 1.76 -> 0.80, q0.20 2.17 -> 1.0, rip 2.23 -> 1.0). A single PSNR number was NOT sufficient and would have shipped a blur: it rises monotonically to full strength on every compressed source and never turns over. Splitting the score by how much detail the GROUND TRUTH carries at each pixel settles it - on a clean plate denoise damages BOTH halves (-15.6 dB detailed, -5.9 dB flat), while on a compressed source BOTH halves improve (q0.2 at full: +0.264 detailed, +0.763 flat), which a blur cannot do. The split is defined on the clean original so it shares no null space with the filter. CRITICALLY the ladder is dense at the HIGH-QUALITY end: the first version of this curve had no measurement between blockiness 1.06 and 1.46, and a real 4K YouTube stream reads ~1.21, so every decision it made about good real-world content was interpolation between two fixtures that resemble no real stream. A pinned check holds what the curve does at 1.214",
+      "verify": "python3 test/run.py",
+      "cwd": ".",
+      "status": "passing",
+      "last_run": "2026-08-29T23:20:08+00:00",
+      "last_verified": "2026-08-29T23:20:08+00:00",
+      "exit_code": 0,
+      "evidence": "...(truncated)...\nwww.youtube.com/*\nPASS  removing the last allowed site unregisters the auto-run script\n        0 script(s) still registered\nPASS  allowing a site injects into tabs ALREADY open on it, not just future loads\n        1 executeScript call(s) after the grant \u2014 registering a content script only affects future navigations, so this is the catch-up\nPASS  the toolbar badge shows ON while active and clears when it is turned off\n        on -> \"ON\"   off -> \"\"\nPASS  a state message from a non-tab context is ignored rather than throwing\n\n=== WebGPU compute path (test/webgpu.html) ===\nrunning\u2026\nPASS  WebGPU is available to test at all\n        navigator.gpu present\nPASS    [diagnostic] adapter\n        apple / metal-3 \u00b7 shader-f16 yes \u00b7 workgroup storage 32768 bytes\nPASS    [diagnostic] WebGPU vs PyTorch\n        interior mean 0.0295/255 max 0.226/255  |  border mean 0.0179/255 max 0.239/255\nPASS  the WebGPU port computes the same thing as PyTorch (f16 tolerance)\n        interior mean 0.0295/255 max 0.226/255, border mean 0.0179/255 max 0.239/255 \u2014 f16 drift is expected, a transposed kernel is not\n\n\u001b[32m130 passed, 0 failed, 1 skipped\u001b[0m\n\u001b[2mSKIP = not measurable headlessly; see the detail line.\u001b[0m",
       "notes": "",
       "slow": false,
       "needs": []

@@ -399,7 +399,7 @@ both harnesses, and exits non-zero on any failure:
 cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 test/run.py
 ```
 
-Current: **127 passed, 0 failed, 1 skipped.** The skip is the perf check, which
+Current: **128 passed, 0 failed, 1 skipped.** The skip is the perf check, which
 headless cannot measure honestly (see below). The count wobbles by two:
 `test/webgpu.html` races the headless runner's virtual clock during GPU init. It
 never *fails* — one check is emitted synchronously, so "produced no checks at
@@ -419,7 +419,7 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 
 `ledger status` in this folder is the machine-checked truth:
 
-**19 active claims: 17 passing, 0 failing, 2 awaiting a human.**
+**20 active claims: 17 passing, 0 failing, 2 awaiting a human, 1 attested.**
 
 | | claim |
 |---|---|
@@ -430,7 +430,9 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 | PASS | `no-harm-on-bad-sources` — `max` stays within 1.0 dB of untouched on a crf45 rip |
 | PASS | `restore-removes-compression-damage` — 75% of the excess blocking, with the signature a blur cannot fake |
 | PASS | `restore-measures-the-source` — strength, grid phase and grid period are all measured, not assumed |
-| PASS | **`auto-denoise-fitted-on-detail-split`** — denoise auto-tunes too, on a metric a blur cannot fool |
+| PASS | **`auto-denoise-fitted-on-detail-split-v2`** — denoise auto-tunes too, on a metric a blur cannot fool |
+| ATTD | **`loads-and-runs-in-real-chrome`** — confirmed on live 4K YouTube, in fullscreen |
+| **MANL** | `invocation-remaining-paths` — context menu, auto-run, Cmd+Shift+U, ON badge |
 | PASS | `rescue-preset-dominates` — beats the previous best preset on every source, including clean |
 | PASS | `multiframe-reconstruction` — real detail from neighbouring frames, isolated by the copies-vs-real ablation |
 | PASS | `backprojection-gated-on-source-quality` — and it has to be; ungated it reprints the blocking |
@@ -443,7 +445,7 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 | PASS | **`invocation-wiring`** — every decision the service worker makes, against a mock `chrome.*` |
 | **MANL** | `invocation-in-real-chrome` — **unproven; Chrome 151 ignores `--load-extension`, so this needs a person** |
 
-Twelve further claims have been **retired** rather than deleted, each with the
+Fourteen further claims have been **retired** rather than deleted, each with the
 reason recorded in `LEDGER.json` — mostly figures that were true when measured
 and stopped describing the code once a stage was added. A retired claim is not a
 deleted one; the reason it stopped being true is the interesting part.

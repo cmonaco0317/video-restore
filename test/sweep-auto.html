@@ -164,13 +164,19 @@ const OFF = { sharpen: 0, detail: 0, vibrance: 0, shadow: 0, denoise: 0, chroma:
   // Build the ladder of sources: pristine, five JPEG levels, and the real rip.
   const cleanCv = toCanvas(clean, W, H);
   const sources = [['clean', cleanCv]];
-  for (const q of [0.6, 0.35, 0.2, 0.12, 0.06]) {
+  // The high-quality end is deliberately dense. Both auto-curves were first
+  // fitted with NOTHING measured between blockiness 1.06 and 1.46 — and a real
+  // 4K YouTube stream reads ~1.21, i.e. every decision made about good
+  // real-world content came from interpolation between a pristine PNG and a
+  // badly crushed one. Neither fixture resembles a decent stream.
+  for (const q of [0.98, 0.95, 0.9, 0.82, 0.75, 0.68, 0.6, 0.35, 0.2, 0.12, 0.06]) {
     sources.push([`jpeg-q${q}`, await crush(cleanCv, q)]);
   }
   sources.push(['lowbitrate.png', toCanvas(rip, W, H)]);
 
   const STAGES = [
     ['denoise', [0, 0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0]],
+    ['deblock', [0, 0.1, 0.2, 0.35, 0.5, 0.65, 0.8, 0.9, 1.0]],
     ['deband',  [0, 0.15, 0.3, 0.45, 0.6, 0.75, 1.0]],
     ['chroma',  [0, 0.2, 0.4, 0.6, 0.85, 1.0]],
   ];

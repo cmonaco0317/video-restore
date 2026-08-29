@@ -149,11 +149,24 @@
    * Blockiness -> denoise strength.
    *
    * Fitted to the strengths that measured best against a clean original, on a
-   * ladder of JPEG degradations plus the real rip (worst error 0.018):
-   *     clean  1.06 -> 0        q0.35  1.76 -> 0.8      q0.12  2.82 -> 1.0
-   *     q0.6   1.46 -> 0.6      q0.2   2.17 -> 1.0      rip    2.23 -> 1.0
+   * ladder of 11 JPEG degradations plus the real rip — 13 points, worst error
+   * 0.043:
+   *     clean 1.06 -> 0      q0.90 1.16 -> 0.30    q0.60 1.46 -> 0.6
+   *     q0.98 1.07 -> 0      q0.82 1.25 -> 0.45    q0.35 1.76 -> 0.8
+   *     q0.95 1.11 -> 0.20   q0.75 1.33 -> 0.45    q0.20 2.17 -> 1.0
+   *     q0.68 1.43 -> 0.60   rip   2.23 -> 1.0     q0.06 4.46 -> 1.0
    * Square root for the same reason as deblock: the damage climbs faster than
    * the useful correction does.
+   *
+   * 🔴 The high-quality end of that ladder is dense BECAUSE THE FIRST FIT WAS
+   * WRONG THERE, and wrong exactly where it mattered. It was calibrated with
+   * nothing measured between blockiness 1.06 and 1.46 — a pristine PNG and a
+   * badly crushed one — and then interpolated across the gap. A real 4K YouTube
+   * stream reads about **1.21**, i.e. dead centre of the unmeasured span, so
+   * every decision this made about good real-world content was extrapolation
+   * dressed as a fit. Filling the gap moved the worst error from 0.118 to 0.043
+   * and the curve up by as much as 0.12 in that band. Fixtures at the extremes
+   * do not calibrate the middle, and the middle is where real sources live.
    *
    * 🔴 The naive version of this measurement was WRONG and would have shipped a
    * blur. A single PSNR number rises monotonically to denoise=1.0 on every
@@ -176,7 +189,7 @@
    * slow start protects.
    */
   function autoDenoise(blockiness) {
-    return Math.max(0, Math.min(1, Math.sqrt(Math.max(0, (blockiness - 1.10) / 1.05))));
+    return Math.max(0, Math.min(1, Math.sqrt(Math.max(0, (blockiness - 1.065) / 1.08))));
   }
 
   function autoBackproject(blockiness) {

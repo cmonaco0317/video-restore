@@ -129,6 +129,32 @@ cost credibility twice. "Visibly cleaner, still soft" is the truthful claim.
 
 ## Hard-won gotchas — read before changing anything
 
+**🔴 Fixtures at the extremes do not calibrate the middle, and the middle is where
+real sources live.** `autoDenoise` was first fitted with **nothing measured
+between blockiness 1.06 and 1.46** — a pristine PNG and a badly crushed plate,
+neither of which resembles a real stream. Carter's 2026-08-29 screenshot of live
+4K YouTube read blockiness **~1.21**, dead centre of that gap: every decision the
+curve made about good real-world content was interpolation dressed as a fit.
+Densifying the ladder (11 JPEG levels instead of 5, dense at the HIGH-quality
+end) moved the curve up by as much as **0.12** in that band and the worst error
+from **0.118 to 0.043**. A test now pins what the curve does at 1.214 specifically,
+so a retune cannot satisfy the extreme fixtures while quietly changing
+real-world behaviour. Check where your real inputs land on the axis before
+trusting a fit built from convenient fixtures.
+
+**⚠️ Two instruments disagree about DEBLOCK strength, and it is NOT resolved.**
+Swept the same way as denoise, the detail-split metric says the shipped deblock
+curve runs about **0.15 hot** through the mid band (at blockiness 1.46 it applies
+0.35 where detail peaks at 0.20; at 2.17 it applies 0.64 where detail peaks at
+0.50). **Deblock was deliberately not retuned on that evidence.** The instrument
+may structurally penalise a deblocker for doing its job: a grid artifact sitting
+in a region the ground truth calls "detailed" reads as detail being removed, when
+removing it is the point. Deblock's own claim uses the grid-vs-interior split —
+a more targeted instrument — and says it is working (+0.85 dB on grid pixels vs
++0.13 dB on interiors). Reconciling the two needs a measurement designed for it,
+not a judgement call. Do not retune deblock off the detail split alone.
+
+
 **🔴 Metrics: "more detail" is not "better".** On a compressed source, amplified
 artifact and recovered detail are the *same high-frequency energy*. ~60 tests were
 green while the picture was visibly wrecked, because every one of them asked "is
