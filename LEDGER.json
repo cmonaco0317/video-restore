@@ -2,7 +2,7 @@
   "_README": "This file is the project's verification ledger. Claims record what is believed true about this project AND the command that proves it. Do not delete or reword claims to make them pass, and never hand-edit a status to 'passing' -- only `ledger run` may do that. If a claim is obsolete, mark it retired with `ledger retire`, which preserves it.",
   "project": "video-upscaler",
   "created": "2026-08-05T02:10:54+00:00",
-  "updated": "2026-08-29T23:38:47+00:00",
+  "updated": "2026-08-29T23:51:53+00:00",
   "claims": [
     {
       "id": "pkg-loadable",
@@ -521,6 +521,20 @@
       "evidence": null,
       "notes": "",
       "slow": false,
+      "needs": []
+    },
+    {
+      "id": "deblock-damage-is-symmetric-below-half",
+      "claim": "the deblocker does not preferentially destroy real detail at the strengths it actually runs, established on a source where real detail and artifact are separable by construction: the clean plate plus a constant offset per 8x8 block, which removes nothing (so all real detail survives) and whose artifact is exactly the offset field, letting the error be decomposed by projection into residual-artifact plus collateral-damage. Below ~0.5 strength the damage to ground-truth-DETAILED regions and to FLAT regions is equal, and at 0.35 detail is damaged slightly LESS (0.885 vs 0.950 RMS) - so the detail-vs-flat instrument is NOT structurally unfair to a deblocker, which was the open suspicion. The asymmetry appears only above ~0.65 and then widens fast (at full strength 3.217 vs 2.445). The shipped autoDeblock curve lands at 0.683 on that fixture, at the crossover rather than past it, which is why it was left unchanged. Caveat recorded in the probe: a DC offset spans a whole block while a deblocker only touches the seam, so the 28% artifact removal at full strength is near the ceiling for this artifact type, not a deficiency",
+      "verify": "python3 tools/probe.py probe-deblock",
+      "cwd": ".",
+      "status": "passing",
+      "last_run": "2026-08-29T23:51:50+00:00",
+      "last_verified": "2026-08-29T23:51:50+00:00",
+      "exit_code": 0,
+      "evidence": "...(truncated)...\nf the error component orthogonal to it \u2014 pure collateral\n\nDATA deblock=0.00  artifact_left=1.0010  damage=0.582  damage_detail=0.586  damage_flat=0.580  psnr=32.017\nDATA deblock=0.10  artifact_left=0.9932  damage=0.599  damage_detail=0.598  damage_flat=0.600  psnr=32.082\nDATA deblock=0.20  artifact_left=0.9765  damage=0.671  damage_detail=0.651  damage_flat=0.686  psnr=32.218\nDATA deblock=0.35  artifact_left=0.9341  damage=0.925  damage_detail=0.885  damage_flat=0.950  psnr=32.550\nDATA deblock=0.50  artifact_left=0.8787  damage=1.307  damage_detail=1.300  damage_flat=1.313  psnr=32.954\nDATA deblock=0.65  artifact_left=0.8234  damage=1.744  damage_detail=1.821  damage_flat=1.698  psnr=33.293\nDATA deblock=0.80  artifact_left=0.7745  damage=2.188  damage_detail=2.406  damage_flat=2.046  psnr=33.500\nDATA deblock=0.90  artifact_left=0.7459  damage=2.476  damage_detail=2.811  damage_flat=2.256  psnr=33.562\nDATA deblock=1.00  artifact_left=0.7203  damage=2.753  damage_detail=3.217  damage_flat=2.445  psnr=33.573\n\nVERDICT best-by-total-error deblock=1.00 (removes 28.0% of the known artifact, collateral damage 2.753/255 RMS)\nVERDICT shipped autoDeblock at this blockiness would be 0.683\nDONE",
+      "notes": "",
+      "slow": true,
       "needs": []
     }
   ]

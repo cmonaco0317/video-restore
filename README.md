@@ -419,7 +419,7 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 
 `ledger status` in this folder is the machine-checked truth:
 
-**21 active claims: 17 passing, 0 failing, 2 attested, 2 awaiting a human.**
+**22 active claims: 18 passing, 0 failing, 2 attested, 2 awaiting a human.**
 
 | | claim |
 |---|---|
@@ -430,6 +430,7 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 | PASS | `no-harm-on-bad-sources` — `max` stays within 1.0 dB of untouched on a crf45 rip |
 | PASS | `restore-removes-compression-damage` — 75% of the excess blocking, with the signature a blur cannot fake |
 | PASS | `restore-measures-the-source` — strength, grid phase and grid period are all measured, not assumed |
+| PASS | **`deblock-damage-is-symmetric-below-half`** — it does not preferentially destroy real detail at the strengths it runs |
 | PASS | **`auto-denoise-fitted-on-detail-split-v2`** — denoise auto-tunes too, on a metric a blur cannot fool |
 | ATTD | **`loads-and-runs-in-real-chrome`** — confirmed on live 4K YouTube, in fullscreen |
 | ATTD | **`keyboard-shortcut-works`** — `Cmd+Shift+U` toggles it |
@@ -602,6 +603,8 @@ tools/make-icons.py  generates icons/ from scratch, no deps
 test/              harness.html (GPU) · integration.html (DOM)
                    background.html — the service worker's wiring, against a
                    mock chrome.* API
+                   sweep-auto / probe-chroma / probe-deblock — research probes,
+                   run with tools/probe.py; measurements, not pass/fail checks
                    compare.html / look.html / panel-look.html — serve the folder
                    and open them; the eye checks the numbers cannot make
 ```

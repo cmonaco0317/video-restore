@@ -1,0 +1,188 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Video Upscaler — deblock reconciliation</title>
+<!-- Two instruments disagree about how hard the deblocker should run.
+
+     The grid-vs-interior split (the deblock claim's own instrument) says it is
+     working: +0.85 dB on grid pixels against +0.13 dB on interiors. The
+     detail-vs-flat split introduced for the denoise fit says the shipped curve
+     runs about 0.15 hot through the mid band. Both cannot be the whole story,
+     and the suspicion was that the detail split PENALISES A DEBLOCKER FOR DOING
+     ITS JOB: a grid artifact lying across a region the ground truth calls
+     "detailed" reads as detail being destroyed, when destroying it is the point.
+
+     Neither instrument can settle that, because on a real compressed source
+     nobody knows which high-frequency energy is real and which is artifact.
+
+     So build a source where that IS known. Take the clean plate and add a
+     CONSTANT OFFSET PER 8x8 BLOCK. Nothing is removed — every bit of real detail
+     survives untouched — and the artifact is exactly the offset field, which we
+     hold. Now the error of any output decomposes exactly:
+
+         error = (residual artifact)  +  (damage to real detail)
+
+     by projecting it onto the known offset field. The first term is what the
+     deblocker is for; the second is what it costs. No metric has to be trusted.
+     Read with tools/probe.py probe-deblock. -->
+<style>body{background:#0d1018;color:#dfe6ef;font:12px/1.5 ui-monospace,Menlo,monospace;margin:20px}
+pre{white-space:pre-wrap}</style>
+<pre id="log">running…</pre>
+<script src="../cnn-weights.js"></script>
+<script src="../core.js"></script>
+<script>
+const out = [];
+const say = (s) => { out.push(s); document.getElementById('log').textContent = out.join('\n'); };
+const load = (src) => new Promise((res, rej) => {
+  const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
+});
+const OFF = { sharpen:0, detail:0, vibrance:0, shadow:0, denoise:0, chroma:0, deband:0,
+              temporal:0, antiring:0, saturation:1, contrast:1, gain:1, split:0,
+              neural:0, deblock:0, dering:0, backproject:0, upscaler:'fsr' };
+
+// Deterministic PRNG — the offset field must be identical across strengths, and
+// across runs, or the comparison is against a different artifact each time.
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+(async () => {
+  let clean;
+  try { clean = await load('clean.png'); }
+  catch (e) { say('FIXTURE MISSING ' + e); document.title='done'; return; }
+  const W = clean.naturalWidth, H = clean.naturalHeight;
+
+  const gtCv = document.createElement('canvas'); gtCv.width=W; gtCv.height=H;
+  gtCv.getContext('2d').drawImage(clean, 0, 0);
+  const gt = gtCv.getContext('2d').getImageData(0,0,W,H);
+
+  // --- the known artifact: one constant offset per 8x8 block ---------------
+  // This is what quantisation actually does at low bitrate — it drags each
+  // transform block toward its own mean, which shows up as a DC step at the
+  // boundaries. Crucially it REMOVES NOTHING, so real detail is fully intact
+  // and any loss of it in the output is unambiguously the deblocker's doing.
+  const rnd = mulberry32(20260829);
+  const offset = new Float32Array(W*H);
+  const AMP = 11;
+  for (let by = 0; by < Math.ceil(H/8); by++) {
+    for (let bx = 0; bx < Math.ceil(W/8); bx++) {
+      const o = (rnd()*2 - 1) * AMP;
+      for (let y = by*8; y < Math.min(by*8+8, H); y++)
+        for (let x = bx*8; x < Math.min(bx*8+8, W); x++) offset[y*W+x] = o;
+    }
+  }
+  const degCv = document.createElement('canvas'); degCv.width=W; degCv.height=H;
+  const degImg = degCv.getContext('2d').createImageData(W,H);
+  for (let p = 0; p < W*H; p++) {
+    const o = offset[p];
+    for (let c = 0; c < 3; c++)
+      degImg.data[p*4+c] = Math.max(0, Math.min(255, gt.data[p*4+c] + o));
+    degImg.data[p*4+3] = 255;
+  }
+  degCv.getContext('2d').putImageData(degImg, 0, 0);
+
+  function render(src, opts) {
+    const cv=document.createElement('canvas'); cv.width=W; cv.height=H;
+    const e=VUCore.createEngine(cv); e.upload(src); e.render(Object.assign({},OFF,opts));
+    const px=new Uint8Array(W*H*4);
+    e.gl.readPixels(0,0,W,H,e.gl.RGBA,e.gl.UNSIGNED_BYTE,px); e.dispose(); return px;
+  }
+
+  // ground-truth detail mask, same construction as the denoise sweep
+  const detailMask = (() => {
+    const lum = new Float32Array(W*H);
+    for (let i=0,p=0;i<gt.data.length;i+=4,p++)
+      lum[p] = 0.2126*gt.data[i] + 0.7152*gt.data[i+1] + 0.0722*gt.data[i+2];
+    const act = new Float32Array(W*H);
+    for (let y=1;y<H-1;y++) for (let x=1;x<W-1;x++) {
+      const p=y*W+x;
+      act[p] = Math.abs(lum[p]-lum[p-1]) + Math.abs(lum[p]-lum[p+1]) +
+               Math.abs(lum[p]-lum[p-W]) + Math.abs(lum[p]-lum[p+W]);
+    }
+    const sorted = Float32Array.from(act).sort();
+    const hi = sorted[Math.floor(sorted.length*0.67)], lo = sorted[Math.floor(sorted.length*0.33)];
+    const m = new Uint8Array(W*H);
+    for (let p=0;p<act.length;p++) m[p] = act[p]>=hi ? 2 : (act[p]<=lo ? 1 : 0);
+    return m;
+  })();
+
+  // <offset, offset> once — the projection denominator
+  let oo = 0;
+  for (let p=0;p<W*H;p++) oo += offset[p]*offset[p];
+
+  /* Decompose the error of an output against the clean original.
+   *   coeff  — the scalar projection onto the known offset field.
+   *            1.0 = the artifact is entirely still there, 0 = entirely removed.
+   *   damage — RMS of whatever is left after removing that component, i.e.
+   *            everything the deblocker did that was NOT undoing the artifact. */
+  function decompose(px) {
+    let eo = 0;
+    const err = new Float32Array(W*H);
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++) {
+      const p = y*W+x;
+      const a = px[((H-1-y)*W+x)*4], b = gt.data[p*4];
+      err[p] = a - b; eo += err[p]*offset[p];
+    }
+    const coeff = oo ? eo/oo : 0;
+    let dsum=0, dn=0, dDet=0, nDet=0, dFlat=0, nFlat=0;
+    for (let p=0;p<W*H;p++) {
+      const r = err[p] - coeff*offset[p];
+      dsum += r*r; dn++;
+      if (detailMask[p]===2) { dDet += r*r; nDet++; }
+      else if (detailMask[p]===1) { dFlat += r*r; nFlat++; }
+    }
+    return { coeff,
+             damage: Math.sqrt(dsum/dn),
+             damageDetail: Math.sqrt(dDet/Math.max(nDet,1)),
+             damageFlat: Math.sqrt(dFlat/Math.max(nFlat,1)) };
+  }
+  function psnrWhere(px, want) {
+    let se=0,n=0;
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++) {
+      const p=y*W+x; if (want !== null && detailMask[p]!==want) continue;
+      const a=px[((H-1-y)*W+x)*4], b=gt.data[p*4];
+      se+=(a-b)*(a-b); n++;
+    }
+    return n ? 10*Math.log10(255*255/Math.max(se/n,1e-9)) : NaN;
+  }
+
+  const e0 = VUCore.createEngine(document.createElement('canvas'));
+  e0.upload(degCv);
+  let blockiness = NaN;
+  try { blockiness = e0.measureGrid().blockiness; } catch(_) {}
+  e0.dispose();
+  say(`# synthetic block-offset source, amplitude ±${AMP}/255, measured blockiness ${blockiness.toFixed(3)}`);
+  say('# artifact_left = projection onto the KNOWN offset field (1 = untouched, 0 = gone)');
+  say('# damage = RMS of the error component orthogonal to it — pure collateral');
+  say('');
+
+  const base = decompose(render(degCv, {}));
+  say(`DATA deblock=0.00  artifact_left=${base.coeff.toFixed(4)}  damage=${base.damage.toFixed(3)}  ` +
+      `damage_detail=${base.damageDetail.toFixed(3)}  damage_flat=${base.damageFlat.toFixed(3)}  ` +
+      `psnr=${psnrWhere(render(degCv,{}),null).toFixed(3)}`);
+
+  const rows = [];
+  for (const v of [0.1, 0.2, 0.35, 0.5, 0.65, 0.8, 0.9, 1.0]) {
+    const px = render(degCv, { deblock: v });
+    const d = decompose(px);
+    rows.push({ v, ...d, psnr: psnrWhere(px, null) });
+    say(`DATA deblock=${v.toFixed(2)}  artifact_left=${d.coeff.toFixed(4)}  damage=${d.damage.toFixed(3)}  ` +
+        `damage_detail=${d.damageDetail.toFixed(3)}  damage_flat=${d.damageFlat.toFixed(3)}  ` +
+        `psnr=${psnrWhere(px,null).toFixed(3)}`);
+  }
+
+  const best = rows.reduce((a,b) => b.psnr > a.psnr ? b : a);
+  say('');
+  say(`VERDICT best-by-total-error deblock=${best.v.toFixed(2)} ` +
+      `(removes ${((1-best.coeff)*100).toFixed(1)}% of the known artifact, ` +
+      `collateral damage ${best.damage.toFixed(3)}/255 RMS)`);
+  say(`VERDICT shipped autoDeblock at this blockiness would be ` +
+      `${(0.90*Math.sqrt(Math.max(0,Math.min(1,(blockiness-1.15)/2.0)))).toFixed(3)}`);
+  say('DONE');
+  document.title = 'done';
+})().catch(e => { say('ERROR ' + (e && e.stack || e)); document.title='done'; });
+</script>

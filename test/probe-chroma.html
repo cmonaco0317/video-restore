@@ -1,0 +1,222 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Video Upscaler — chroma-bandwidth probe</title>
+<!-- Can chroma reconstruction be driven WITHOUT a clean original?
+
+     The sweep established that chroma's optimum moves a lot but blockiness is
+     the wrong driver: lowbitrate.png at blockiness 2.234 wants chroma 0.0 where
+     JPEG at 2.166 wants 0.6. What explained it was the chroma-vs-luma ERROR
+     ratio (1.13-1.29 for the JPEG ladder, 0.401 for the rip) — but that needs
+     the clean original, which production does not have.
+
+     So: measure the thing 4:2:0 physically does to the source, from the source
+     alone. Chroma is stored at half resolution and interpolated back, which
+     makes fine-scale chroma SMOOTH BY CONSTRUCTION. For an interpolated signal
+     C(x+1) ~= (C(x)+C(x+2))/2, so the 1-step difference collapses to about half
+     the 2-step one and the ratio below sits near 1.0. For full-bandwidth chroma
+     the two differences are comparable and the ratio runs toward 2.0.
+
+     The question this page answers is ONLY: does that number separate the
+     sources whose measured optima disagree? If it does not, chroma auto-tuning
+     is dead and that is the result. Read with tools/probe.py probe-chroma. -->
+<style>body{background:#0d1018;color:#dfe6ef;font:12px/1.5 ui-monospace,Menlo,monospace;margin:20px}
+pre{white-space:pre-wrap}</style>
+<pre id="log">running…</pre>
+<script src="../cnn-weights.js"></script>
+<script src="../core.js"></script>
+<script>
+const out = [];
+const say = (s) => { out.push(s); document.getElementById('log').textContent = out.join('\n'); };
+const load = (src) => new Promise((res, rej) => {
+  const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
+});
+function toCanvas(img, w, h) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  c.getContext('2d').drawImage(img, 0, 0, w, h); return c;
+}
+function crush(src, q) {
+  return new Promise((res) => {
+    const im = new Image();
+    im.onload = () => { const c = document.createElement('canvas');
+      c.width = src.width; c.height = src.height;
+      c.getContext('2d').drawImage(im, 0, 0); res(c); };
+    im.src = src.toDataURL('image/jpeg', q);
+  });
+}
+const OFF = { sharpen:0, detail:0, vibrance:0, shadow:0, denoise:0, chroma:0, deband:0,
+              temporal:0, antiring:0, saturation:1, contrast:1, gain:1, split:0,
+              neural:0, deblock:0, dering:0, backproject:0, upscaler:'fsr' };
+
+(async () => {
+  let clean, rip, dark;
+  try { clean = await load('clean.png'); rip = await load('lowbitrate.png');
+        dark = await load('darkrip.png'); }
+  catch (e) { say('FIXTURES MISSING ' + e); document.title='done'; return; }
+  const W = clean.naturalWidth, H = clean.naturalHeight;
+  let gtPx = toCanvas(clean, W, H).getContext('2d').getImageData(0,0,W,H).data;
+
+  function psnr(px) {
+    let se=0,n=0;
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++) {
+      const a=px[((H-1-y)*W+x)*4], b=gtPx[(y*W+x)*4];
+      se+=(a-b)*(a-b); n++;
+    }
+    return 10*Math.log10(255*255/Math.max(se/n,1e-9));
+  }
+  function render(src, opts) {
+    const cv=document.createElement('canvas'); cv.width=W; cv.height=H;
+    const e=VUCore.createEngine(cv); e.upload(src); e.render(Object.assign({},OFF,opts));
+    const px=new Uint8Array(W*H*4);
+    e.gl.readPixels(0,0,W,H,e.gl.RGBA,e.gl.UNSIGNED_BYTE,px); e.dispose(); return px;
+  }
+
+  /* THE CANDIDATE RUNTIME SIGNAL — source only, no reference.
+   *
+   * For each row, compare the mean 1-step chroma difference against half the
+   * mean 2-step one. Interpolated (subsampled) chroma has the 1-step collapse
+   * toward that half, giving ~1.0; full-bandwidth chroma gives ~2.0. Measured on
+   * BOTH axes because 4:2:0 subsamples both, and 4:2:2 only one — which is
+   * exactly the case a single-axis measurement would misread. */
+  function chromaBandwidth(srcCanvas) {
+    const px = srcCanvas.getContext('2d').getImageData(0,0,W,H).data;
+    const cb = new Float32Array(W*H), cr = new Float32Array(W*H);
+    for (let i=0,p=0;i<px.length;i+=4,p++) {
+      const y = 0.2126*px[i] + 0.7152*px[i+1] + 0.0722*px[i+2];
+      cb[p] = px[i+2]-y; cr[p] = px[i]-y;
+    }
+    // Horizontal walks within rows; vertical strides a full row. Both use the
+    // same guard, so the last two rows/columns are simply not sampled.
+    let hd1=0, hd2=0, hn=0;
+    for (let y=0;y<H;y++) for (let x=0;x+2<W;x++) {
+      const p=y*W+x;
+      hd1 += Math.abs(cb[p]-cb[p+1]) + Math.abs(cr[p]-cr[p+1]);
+      hd2 += Math.abs(cb[p]-cb[p+2]) + Math.abs(cr[p]-cr[p+2]);
+      hn++;
+    }
+    let vd1=0, vd2=0, vn=0;
+    for (let y=0;y+2<H;y++) for (let x=0;x<W;x++) {
+      const p=y*W+x;
+      vd1 += Math.abs(cb[p]-cb[p+W]) + Math.abs(cr[p]-cr[p+W]);
+      vd2 += Math.abs(cb[p]-cb[p+2*W]) + Math.abs(cr[p]-cr[p+2*W]);
+      vn++;
+    }
+    const h = hd2 ? (hd1/hn)/(0.5*(hd2/hn)) : NaN;
+    const v = vd2 ? (vd1/vn)/(0.5*(vd2/vn)) : NaN;
+
+    /* The raw ratio is CONTENT-DEPENDENT: a dark grainy frame and a bright
+     * detailed one have different fine-scale statistics, and measured across two
+     * content families that baseline shift was larger than the entire useful
+     * signal range. So compute the identical quantity on LUMA — which was NOT
+     * subsampled — and divide. Whatever the content does to fine-scale structure
+     * should do it to both planes, and cancel. */
+    const lum = new Float32Array(W*H);
+    for (let i=0,q=0;i<px.length;i+=4,q++)
+      lum[q] = 0.2126*px[i] + 0.7152*px[i+1] + 0.0722*px[i+2];
+    let lhd1=0, lhd2=0, lhn=0;
+    for (let y=0;y<H;y++) for (let x=0;x+2<W;x++) {
+      const q=y*W+x;
+      lhd1 += Math.abs(lum[q]-lum[q+1]); lhd2 += Math.abs(lum[q]-lum[q+2]); lhn++;
+    }
+    let lvd1=0, lvd2=0, lvn=0;
+    for (let y=0;y+2<H;y++) for (let x=0;x<W;x++) {
+      const q=y*W+x;
+      lvd1 += Math.abs(lum[q]-lum[q+W]); lvd2 += Math.abs(lum[q]-lum[q+2*W]); lvn++;
+    }
+    const lh = lhd2 ? (lhd1/lhn)/(0.5*(lhd2/lhn)) : NaN;
+    const lv = lvd2 ? (lvd1/lvn)/(0.5*(lvd2/lvn)) : NaN;
+    const lumaMean = (lh+lv)/2;
+
+    /* THIRD CANDIDATE — structural, not statistical.
+     *
+     * Both ratios above are content-dependent by more than their useful range.
+     * This looks for the FINGERPRINT of upsampling instead: 4:2:0 stores chroma
+     * at half resolution, so after upsampling one parity of columns carries
+     * stored samples and the other carries interpolated ones. An interpolated
+     * sample sits close to the mean of its neighbours, so its second difference
+     * |C(x-1) - 2C(x) + C(x+1)| collapses toward zero while the stored parity's
+     * does not. Full-bandwidth chroma has no reason to prefer either parity.
+     *
+     * Reported as the ratio of the WEAKER parity's mean second difference to the
+     * stronger one: ~1.0 means no parity structure (not subsampled), and values
+     * well below 1.0 mean one parity is systematically smoother, i.e. it was
+     * interpolated. This is the same trick the restore stage already uses to
+     * find the DCT grid's phase, applied to a period of 2. */
+    const parity = (stride, wLim, hLim) => {
+      const acc = [0, 0], cnt = [0, 0];
+      for (let y = 1; y < hLim; y++) for (let x = 1; x < wLim; x++) {
+        const q = y*W + x;
+        const d2cb = Math.abs(cb[q-stride] - 2*cb[q] + cb[q+stride]);
+        const d2cr = Math.abs(cr[q-stride] - 2*cr[q] + cr[q+stride]);
+        const par = (stride === 1 ? x : y) & 1;
+        acc[par] += d2cb + d2cr; cnt[par]++;
+      }
+      const a = cnt[0] ? acc[0]/cnt[0] : 0, b = cnt[1] ? acc[1]/cnt[1] : 0;
+      const hi = Math.max(a, b), lo = Math.min(a, b);
+      return hi > 1e-6 ? lo/hi : 1;
+    };
+    const parH = parity(1, W-1, H-1);
+    const parV = parity(W, W-1, H-1);
+
+    return { h, v, mean: (h+v)/2, luma: lumaMean, norm: ((h+v)/2) / lumaMean,
+             parity: Math.min(parH, parV) };
+  }
+
+  /* TWO CONTENT FAMILIES, not one.
+   *
+   * Every source in the first family is the SAME IMAGE at different
+   * compressions, so a signal that merely tracked this picture's colour
+   * statistics would fit it perfectly and mean nothing. darkrip.png is
+   * different content — a dark, grainy frame — and gets the identical ladder
+   * built on top of it, scored against ITSELF as ground truth. If the
+   * bandwidth->strength relationship does not survive the change of content,
+   * the signal is not a driver. */
+  const VALUES = [0, 0.2, 0.4, 0.6, 0.85, 1.0];
+  say('# family  source  chromaBW_h  chromaBW_v  chromaBW_mean  best_chroma  gain_dB');
+  const rows = [];
+
+  for (const [family, baseImg] of [['clean.png', clean], ['darkrip.png', dark]]) {
+    const baseCv = toCanvas(baseImg, W, H);
+    gtPx = baseCv.getContext('2d').getImageData(0, 0, W, H).data;
+    const sources = [[`${family}:pristine`, baseCv]];
+    for (const q of [0.95, 0.82, 0.6, 0.35, 0.2, 0.12, 0.06]) {
+      sources.push([`${family}:jpeg-q${q}`, await crush(baseCv, q)]);
+    }
+    // the real rip only belongs to the clean.png family — it IS that frame
+    if (family === 'clean.png') sources.push(['clean.png:lowbitrate.png', toCanvas(rip, W, H)]);
+
+    for (const [name, src] of sources) {
+      const bw = chromaBandwidth(src);
+      const base = psnr(render(src, {}));
+      let best = null;
+      const curve = [];
+      for (const v of VALUES) {
+        const p = psnr(render(src, { chroma: v }));
+        curve.push(`${v}:${p.toFixed(3)}`);
+        if (!best || p > best.p) best = { v, p };
+      }
+      rows.push({ family, name, bw: bw.mean, norm: bw.norm, parity: bw.parity, best: best.v, gain: best.p - base });
+      say(`DATA ${family} ${name} raw=${bw.mean.toFixed(4)} luma=${bw.luma.toFixed(4)} ` +
+          `norm=${bw.norm.toFixed(4)} parity=${bw.parity.toFixed(4)} best=${best.v} gain=${(best.p-base).toFixed(3)}`);
+      say(`  curve ${name}  ${curve.join('  ')}`);
+    }
+  }
+
+  // The whole point: the two sources whose optima disagree must be separated by
+  // this number, or it is no better than blockiness was.
+  const rip_ = rows.find(r => r.name === 'clean.png:lowbitrate.png');
+  const j2   = rows.find(r => r.name === 'clean.png:jpeg-q0.2');
+  say('');
+  say(`VERDICT-SEPARATION rip bw=${rip_.bw.toFixed(4)} wants ${rip_.best}  |  ` +
+      `jpeg-q0.2 bw=${j2.bw.toFixed(4)} wants ${j2.best}  |  ` +
+      `separation=${(rip_.bw - j2.bw).toFixed(4)}`);
+  // Does the SAME bandwidth imply the SAME strength across the two families?
+  say('');
+  say('VERDICT-CROSS-CONTENT  PARITY signal, both families interleaved:');
+  say('  (if this is a valid driver, best must climb monotonically down the list)');
+  for (const r of rows.slice().sort((a,b) => b.parity - a.parity)) {
+    say(`  parity ${r.parity.toFixed(4)}  best ${String(r.best).padEnd(4)}  ${r.name}`);
+  }
+  say('DONE');
+  document.title = 'done';
+})().catch(e => { say('ERROR ' + (e && e.stack || e)); document.title='done'; });
+</script>
