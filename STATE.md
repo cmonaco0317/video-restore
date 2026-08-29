@@ -63,39 +63,42 @@ does NOT always survive it — hardware overlay planes and protected pipelines a
 why some screen recordings come out black, and compositing a canvas into the page
 is precisely the design that avoids it.
 
-**Still unproven — one needs hardware, one needs a human at a browser:**
-- `output-paths-external-display` — HDMI and AirPlay mirroring, plus the case
-  where the player's own native AirPlay button is used and the upscale should be
-  correctly ABSENT. This machine has one built-in display (`system_profiler`
-  says Connection Type: Internal) and no AirPlay receivers were discoverable, so
-  it cannot be tested here. Both consume the same composite the screenshare test
-  just proved, which is strong evidence but not proof.
-- `invocation-in-real-chrome` — **split out of `invocation-paths` on 2026-08-29,
-  the same way `output-paths` was split, and the wiring two-thirds is now PROVEN.**
-  ✅ `invocation-wiring` (15 checks, `test/background.html`) drives background.js
-  against a mock `chrome.*` API and covers every decision it makes: all eight
-  listeners registered · both menu items built with the right titles on video AND
-  page AND frame, cleared first so a restart cannot duplicate them · the menu item
-  injecting into the clicked tab with the `__VU_MANUAL__` mark landing BEFORE
-  content.js · "Always upscale on this site" carrying the origin to the options
-  page · icon and Cmd+Shift+U reaching the same inject path · the cross-origin
-  fallback · per-site auto-run registering a persistent script with the broad
-  `*://*/*` grant excluded · revocation tearing it down · a newly-allowed site
-  catching up tabs already open · and the ON badge setting, clearing, and ignoring
-  a message with no sender tab.
+**Where the entry points stand (2026-08-29):**
 
-  ⭐ **So the earlier "it may be broken" worry is NOT a wiring bug.** Every
-  decision background.js makes is correct. What remains unproven is the browser
-  integration itself — that Chrome loads the thing and delivers those events.
+✅ **The extension loads and runs in a real Chrome, confirmed on live 4K YouTube**
+(`loads-and-runs-in-real-chrome`, attested). Toolbar icon invoked it, the panel
+followed the video into fullscreen, and every automatic decision behaved on a
+source no fixture resembles: measured the source clean, deblock 0.16, denoise
+0.33, back-projection gate open, governor at ×1.10, serving 2160p.
 
-  🔴 **And that genuinely cannot be automated on this machine.** Chrome 151
-  ignores `--load-extension` from the command line. Verified the long way:
-  headless AND headful, with `--disable-features=DisableLoadExtensionCommandLine
-  Switch`, and with `extensions.ui.developer_mode` pre-seeded into a fresh
-  profile. The extension never registers, never appears in
-  `chrome://extensions-internals`, and its service worker
-  (`gedkemfjoggelefeojfhfglfmiajjpcg`) never becomes a CDP target, while Chrome's
-  own component extensions do. Do not spend another session on the flag.
+✅ **`Cmd+Shift+U` works** (`keyboard-shortcut-works`, attested). ⭐ **This closes
+the oldest open worry in the project.** An earlier attempt to drive it via System
+Events produced *nothing at all*, and that silence sat unexplained for weeks as
+evidence the entry point might be broken. It was not broken. The original silence
+still has no confirmed cause — the fixture was a black frame, the synthetic
+keystroke may have needed Accessibility permission, and the black-frame probe
+demotes after three strikes; any of those produces exactly that silence with
+working code. Recorded rather than solved, because the code is fine.
+
+✅ **Every decision the service worker makes is tested** (`invocation-wiring`, 15
+checks against a mock `chrome.*`).
+
+⬜ **`invocation-remaining-paths-v2`** — context menu, per-site auto-run, ON badge.
+Untried, and **no longer suspected of anything**; the wiring behind all three
+passes. Ten minutes with a browser whenever convenient.
+
+📌 **`output-paths-external-display` — PARKED BY DECISION 2026-08-29.** Carter:
+"put a pin in the hdmi cable test for now." It needs an HDMI cable or an AirPlay
+receiver, neither of which is here. It consumes the same window-server composite
+that `output-paths-screenshare` already proved, which is strong evidence and not
+proof. Do not re-raise it as an open task — it is parked, not forgotten.
+
+🔴 **Chrome 151 ignores `--load-extension`**, so none of the browser-integration
+items can be automated. Verified the long way: headless AND headful, with
+`--disable-features=DisableLoadExtensionCommandLineSwitch`, and with
+`extensions.ui.developer_mode` pre-seeded into a fresh profile. The extension
+never registers and its service worker never becomes a CDP target, while Chrome's
+own component extensions do. Do not spend another session on the flag.
 
 ---
 
@@ -397,21 +400,27 @@ already implemented here) and anti-ringing (measured "a net positive in general"
 
 ## Next, if picked up
 
-**All three items that used to sit here are done.** The better-source lever was
-confirmed live on a real 4K YouTube video; multi-frame reconstruction was built
-(back-projection) and is a passing claim; and `output-paths` was split, with the
-screenshare third now proven by `tools/verify-screenshare.py`. What is left:
+**Nothing here is blocked, and nothing is suspected of being broken.** Every item
+that used to sit in this list is done or attested — see "Where the entry points
+stand" above. What is genuinely open, in the order I would take it:
 
-1. **`invocation-paths` — the oldest unproven thing here, and the one with an
-   actual reason for concern.** Context menu, per-site auto-run, ON badge. One
-   attempt to drive `Cmd+Shift+U` in a throwaway profile produced *nothing* — no
-   panel, no change in the capture. That is not proof it is broken (the fixture
-   was a black frame, the keystroke may have needed Accessibility permission,
-   and the black-frame probe demotes after three strikes), but everything else
-   here has been measured and this has not. Needs a real Chrome profile.
-2. **`output-paths-external-display`** — genuinely needs hardware: an HDMI cable
-   and an AirPlay receiver. Both consume the same composite the screenshare test
-   proved, which is strong evidence, not proof.
+1. **Measure whether per-shot look adaptation beats a fixed look** — step 3 of the
+   automatic-upscaler plan below, and the last real design question. The
+   project's own metric suggests it may not, which is exactly why it wants a
+   cheap measurement rather than a build. `tools/sweep-auto.py` is the rig.
+2. **A runtime-computable chroma-resolution measurement.** Chroma is the one
+   stage whose optimum demonstrably moves but whose driver is still missing — the
+   chroma/luma error ratio that explains it needs a clean original, which
+   production does not have. Detecting 4:2:0 bleed without ground truth would
+   unlock it. See the rejected table.
+3. **Reconcile the two deblock instruments** — the detail-split says the shipped
+   curve runs ~0.15 hot, grid-vs-interior says it is working. Unresolved on
+   purpose; needs a measurement designed for the question, not a judgement call.
+4. **`invocation-remaining-paths-v2`** — context menu, auto-run, ON badge. Ten
+   minutes with a browser, low stakes, wiring already proven.
+
+📌 Not on this list on purpose: `output-paths-external-display`, parked by
+Carter's decision 2026-08-29.
 
 ### The live design question — a fully automatic upscaler
 
@@ -438,7 +447,7 @@ Order to build it: ~~(1) ship `rescue` + auto as the only mode and delete the
 preset picker~~ ✅ **DONE 2026-08-29** — see "IT IS NOW FULLY AUTOMATIC" above and
 the `no-settings-to-get-wrong` claim. ~~(2) extend auto-tuning to denoise, deband and
 chroma~~ ✅ **DONE 2026-08-29, and it split three ways** — denoise now auto-tunes
-(`auto-denoise-fitted-on-detail-split`); deband has nothing to adapt and PSNR
+(`auto-denoise-fitted-on-detail-split-v2`); deband has nothing to adapt and PSNR
 cannot see it; chroma's optimum moves but blockiness is the wrong driver. Both
 negative results are in the rejected table above, with the numbers.
 **(3) MEASURE whether per-shot look adaptation beats a fixed look** before

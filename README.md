@@ -419,7 +419,7 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 
 `ledger status` in this folder is the machine-checked truth:
 
-**20 active claims: 17 passing, 0 failing, 2 awaiting a human, 1 attested.**
+**21 active claims: 17 passing, 0 failing, 2 attested, 2 awaiting a human.**
 
 | | claim |
 |---|---|
@@ -432,7 +432,8 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 | PASS | `restore-measures-the-source` — strength, grid phase and grid period are all measured, not assumed |
 | PASS | **`auto-denoise-fitted-on-detail-split-v2`** — denoise auto-tunes too, on a metric a blur cannot fool |
 | ATTD | **`loads-and-runs-in-real-chrome`** — confirmed on live 4K YouTube, in fullscreen |
-| **MANL** | `invocation-remaining-paths` — context menu, auto-run, Cmd+Shift+U, ON badge |
+| ATTD | **`keyboard-shortcut-works`** — `Cmd+Shift+U` toggles it |
+| **MANL** | `invocation-remaining-paths-v2` — context menu, per-site auto-run, ON badge |
 | PASS | `rescue-preset-dominates` — beats the previous best preset on every source, including clean |
 | PASS | `multiframe-reconstruction` — real detail from neighbouring frames, isolated by the copies-vs-real ablation |
 | PASS | `backprojection-gated-on-source-quality` — and it has to be; ungated it reprints the blocking |
@@ -441,11 +442,10 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 | PASS | `webgpu-does-not-rescue-the-cnn-v2` — 1.11×/1.32×, still doesn't fit |
 | PASS | `better-source-verified-live` — verified on a real 4K YouTube video |
 | PASS | **`output-paths-screenshare`** — **proven**: the picture reaches an OS screen capture |
-| **MANL** | `output-paths-external-display` — **unproven, needs HDMI / an AirPlay receiver** |
+| **MANL** | `output-paths-external-display` — **unproven; needs HDMI / AirPlay, parked by decision** |
 | PASS | **`invocation-wiring`** — every decision the service worker makes, against a mock `chrome.*` |
-| **MANL** | `invocation-in-real-chrome` — **unproven; Chrome 151 ignores `--load-extension`, so this needs a person** |
 
-Fourteen further claims have been **retired** rather than deleted, each with the
+Fifteen further claims have been **retired** rather than deleted, each with the
 reason recorded in `LEDGER.json` — mostly figures that were true when measured
 and stopped describing the code once a stage was added. A retired claim is not a
 deleted one; the reason it stopped being true is the interesting part.
@@ -543,15 +543,26 @@ fullscreen, an actual HDMI cable or AirPlay mirror, and the extension running as
 a loaded extension in a browser.
 
 That last one used to read "the three invocation paths are completely untested".
-They are now covered as far as this machine can cover them: `invocation-wiring`
-drives the service worker against a mock `chrome.*` API and checks every decision
-it makes — menu items, the injection order, the origin handed to the options
-page, the per-site auto-run registration and teardown, the cross-origin fallback,
-the ON badge. What is left is whether the browser loads the thing and delivers
-those events, and that is genuinely not automatable here: **Chrome 151 ignores
-`--load-extension` from the command line**, headless or headful, with the feature
-flag re-enabled and developer mode pre-seeded. So `invocation-in-real-chrome`
-stays manual, and it wants a person with a browser rather than a better script.
+Most of it is now settled. `invocation-wiring` drives the service worker against
+a mock `chrome.*` API and checks **every decision it makes** — menu items, the
+injection order, the origin handed to the options page, the per-site auto-run
+registration and teardown, the cross-origin fallback, the ON badge. And the
+browser integration itself has been confirmed by hand on live 4K YouTube: it
+loads unpacked, the toolbar icon and `Cmd+Shift+U` both work, and the panel
+follows the video into fullscreen.
+
+⭐ **`Cmd+Shift+U` working closes the oldest open worry here.** An earlier attempt
+to drive it produced nothing at all, and that silence sat unexplained as evidence
+the entry point might be broken. It was not. The cause of the original silence is
+recorded rather than solved — a black-frame fixture, a synthetic keystroke that
+may have needed Accessibility permission, and a probe that demotes after three
+strikes all produce exactly that silence with working code.
+
+Left over: the context menu, per-site auto-run and the ON badge, none of them
+suspected of anything. They stay manual because **Chrome 151 ignores
+`--load-extension` from the command line** — headless or headful, with the
+feature flag re-enabled and developer mode pre-seeded — so this wants a person
+with a browser rather than a better script.
 
 ## Honest limits
 

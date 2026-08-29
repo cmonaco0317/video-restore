@@ -2,7 +2,7 @@
   "_README": "This file is the project's verification ledger. Claims record what is believed true about this project AND the command that proves it. Do not delete or reword claims to make them pass, and never hand-edit a status to 'passing' -- only `ledger run` may do that. If a claim is obsolete, mark it retired with `ledger retire`, which preserves it.",
   "project": "video-upscaler",
   "created": "2026-08-05T02:10:54+00:00",
-  "updated": "2026-08-29T23:24:17+00:00",
+  "updated": "2026-08-29T23:33:38+00:00",
   "claims": [
     {
       "id": "pkg-loadable",
@@ -476,9 +476,10 @@
       "last_verified": null,
       "exit_code": null,
       "evidence": null,
-      "notes": "",
+      "notes": "retired: split once the keyboard shortcut was confirmed: Cmd+Shift+U is now attested (keyboard-shortcut-works), which closes the project's oldest open worry. The context menu, per-site auto-run and the ON badge remain unexercised and carry on as invocation-remaining-paths-v2",
       "slow": false,
-      "needs": []
+      "needs": [],
+      "retired": "2026-08-29T23:33:38+00:00"
     },
     {
       "id": "auto-denoise-fitted-on-detail-split-v2",
@@ -490,6 +491,34 @@
       "last_verified": "2026-08-29T23:24:03+00:00",
       "exit_code": 0,
       "evidence": "...(truncated)...\nch falls back to the top frame instead of giving up\n        3 attempts, 2 without allFrames\nPASS  an allowed site gets a registered content script that runs with NO invoking\n        id=vu-auto matches=https://www.youtube.com/* runAt=document_idle\nPASS  the broad \u201call sites\u201d grant is excluded \u2014 auto-run is per-site only\n        https://www.youtube.com/*\nPASS  removing the last allowed site unregisters the auto-run script\n        0 script(s) still registered\nPASS  allowing a site injects into tabs ALREADY open on it, not just future loads\n        1 executeScript call(s) after the grant \u2014 registering a content script only affects future navigations, so this is the catch-up\nPASS  the toolbar badge shows ON while active and clears when it is turned off\n        on -> \"ON\"   off -> \"\"\nPASS  a state message from a non-tab context is ignored rather than throwing\n\n=== WebGPU compute path (test/webgpu.html) ===\nrunning\u2026\nPASS  WebGPU is available to test at all\n        navigator.gpu present\nPASS    [diagnostic] adapter\n        apple / metal-3 \u00b7 shader-f16 yes \u00b7 workgroup storage 32768 bytes\n\n\u001b[32m128 passed, 0 failed, 1 skipped\u001b[0m\n\u001b[2mSKIP = not measurable headlessly; see the detail line.\u001b[0m",
+      "notes": "",
+      "slow": false,
+      "needs": []
+    },
+    {
+      "id": "keyboard-shortcut-works",
+      "claim": "Cmd+Shift+U toggles the upscaler in a real Chrome with the extension loaded unpacked. This closes the oldest open worry in the project: an earlier attempt to drive this shortcut via System Events in a throwaway profile produced NOTHING - no panel, no change in the capture - and that silence was never explained, so it sat as evidence the entry point might be broken. It was not. The likely cause of the original silence stands recorded rather than solved: the fixture was a black frame at the time, the synthetic keystroke may have needed Accessibility permission, and the extension's own black-frame probe demotes after three strikes - any of which would produce exactly that silence with working code",
+      "verify": null,
+      "cwd": ".",
+      "status": "attested",
+      "last_run": "2026-08-29T23:33:38+00:00",
+      "last_verified": "2026-08-29T23:33:38+00:00",
+      "exit_code": null,
+      "evidence": "attested by Carter: Confirmed 2026-08-29 in his own Chrome with the extension loaded unpacked, immediately after the 4K YouTube session in loads-and-runs-in-real-chrome: 'cmd shift u works'",
+      "notes": "",
+      "slow": false,
+      "needs": []
+    },
+    {
+      "id": "invocation-remaining-paths-v2",
+      "claim": "the three entry points still unexercised in a real browser work as a user meets them: right-clicking a video shows 'Upscale video on this page' and clicking it turns the upscaler on; a site added in the options page auto-runs on a fresh load with nothing clicked; and the pinned toolbar icon shows a blue ON badge while active. The WIRING behind all three is covered by invocation-wiring and passes; the toolbar-icon path, loading itself and the keyboard shortcut are all attested. These three are what is left, and none of them is now suspected of being broken - they are simply untried",
+      "verify": null,
+      "cwd": ".",
+      "status": "manual",
+      "last_run": null,
+      "last_verified": null,
+      "exit_code": null,
+      "evidence": null,
       "notes": "",
       "slow": false,
       "needs": []
