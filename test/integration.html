@@ -160,24 +160,47 @@ video.srcObject = src.captureStream(30);
   video.style.objectFit = 'contain';
   await wait(600);
 
-  // --- "pick max once and it stays" ---------------------------------------
-  // loadSettings only restores keys present in DEFAULTS, so a preset value that
-  // is missing from that list silently reverts on every page load. That is the
-  // failure mode behind "why do I have to set this every time".
+  // --- nothing about the picture may survive a reload ---------------------
+  // This assertion is INVERTED from what it used to be. When the panel had
+  // sliders, the bug was a quality key MISSING from the persisted set, because
+  // it would silently revert every page load ("why do I have to set this every
+  // time"). Now the bug is the opposite: a quality key PRESENT in the persisted
+  // set pins an install to a stale configuration it has no UI to escape.
+  //
+  // The upgrade path is the concrete case. Restoring saved quality keys brought
+  // an old install carrying preset:'anime' back with adaptive AND autoRestore
+  // off — every automatic behaviour disabled — and one carrying preset:'custom'
+  // back at detail 0.80, measured 7.07 dB worse than doing nothing, forever.
   {
-    const missing = [];
-    for (const [name, vals] of Object.entries(window.__VU__.presets)) {
-      for (const k of Object.keys(vals)) {
-        if (!window.__VU__.persistedKeys.includes(k)) missing.push(`${name}.${k}`);
-      }
+    const qualityKeys = new Set();
+    for (const vals of Object.values(window.__VU__.presets)) {
+      for (const k of Object.keys(vals)) qualityKeys.add(k);
     }
-    for (const k of ['preset', 'adaptive', 'neural', 'upscaler', 'renderScale']) {
-      if (!window.__VU__.persistedKeys.includes(k)) missing.push(k);
-    }
-    check('every preset value survives a reload (present in the persisted set)',
-          missing.length === 0,
-          missing.length ? 'would silently reset: ' + missing.join(', ')
-                         : `${window.__VU__.persistedKeys.length} keys persisted`);
+    for (const k of ['preset', 'adaptive', 'autoRestore', 'neural', 'upscaler',
+                     'renderScale', 'maxWidth', 'mode', 'split']) qualityKeys.add(k);
+    const leaked = window.__VU__.persistedKeys.filter(k => qualityKeys.has(k));
+    check('no quality setting survives a reload — all of it re-derives from code',
+          leaked.length === 0,
+          leaked.length ? 'would pin a stale config: ' + leaked.join(', ')
+                        : `persists only: ${window.__VU__.persistedKeys.join(', ')}`);
+  }
+
+  // The migration itself: whatever an old install stored, a start must land on
+  // the shipped tuning with adaptation on.
+  {
+    const S1 = window.__VU__.settings;
+    const restore = JSON.stringify(S1);
+    S1.preset = 'custom'; S1.detail = 0.80; S1.autoRestore = false; S1.adaptive = false;
+    window.__VU__.reconcile();                 // 'custom' is deliberately kept verbatim…
+    const customSurvives = S1.detail === 0.80;
+    S1.preset = window.__VU__.persistedDefaults.preset;   // …but a start never loads it
+    window.__VU__.reconcile();
+    check('an old install carrying a stale preset re-derives onto the shipped tuning',
+          S1.autoRestore === true && S1.adaptive === true &&
+          S1.detail === window.__VU__.presets.rescue.detail,
+          `custom-kept-verbatim=${customSurvives} → after start: detail=${S1.detail} ` +
+          `adaptive=${S1.adaptive} autoRestore=${S1.autoRestore}`);
+    Object.assign(S1, JSON.parse(restore));
   }
 
   // --- a retuned preset must actually reach someone who already picked it --
@@ -429,16 +452,40 @@ video.srcObject = src.captureStream(30);
         S.renderScale <= 1.25 + 1e-9,
         `settles at ×${S.renderScale.toFixed(2)} after 40 clean windows (ceiling 1.25)`);
 
-  // Dragging Render x by hand must take control away from the governor,
-  // otherwise the slider appears to snap back on its own.
-  window.__VU__.preset('max');
-  const rsInput = panel.shadowRoot.querySelector('input[data-k="renderScale"]');
-  rsInput.value = '1.60';
-  rsInput.dispatchEvent(new Event('input', { bubbles: true }));
-  check('manual Render x takes control back from the governor',
-        window.__VU__.settings.adaptive === false && window.__VU__.settings.renderScale === 1.6,
-        `adaptive=${window.__VU__.settings.adaptive} renderScale=${window.__VU__.settings.renderScale}`);
+  // There is no manual Render x any more, and its ABSENCE is the thing worth
+  // asserting. The governor used to have to yield to a hand-dragged slider;
+  // now it is the only thing that sets render scale. A control that could take
+  // it off auto would reintroduce exactly the settings this build exists to
+  // remove, so test that no such control is in the panel rather than trusting
+  // the markup to stay stripped.
+  check('no manual Render x control exists to override the governor',
+        !panel.shadowRoot.querySelector('input[data-k="renderScale"]'));
 
+  const panelInputs = [...panel.shadowRoot.querySelectorAll('input[data-k]')]
+        .map(i => i.dataset.k);
+  check('the panel exposes exactly one input, and it is A/B split',
+        panelInputs.length === 1 && panelInputs[0] === 'split',
+        `inputs: ${panelInputs.join(', ') || '(none)'}`);
+
+  const pickers = panel.shadowRoot.querySelectorAll('[data-p],[data-m],[data-x],[data-n]');
+  check('no preset / mode / upscaler / neural pickers remain in the panel',
+        pickers.length === 0,
+        `${pickers.length} picker control(s) still present`);
+
+  // The shipped configuration is `rescue`, and that is a measured choice: it
+  // beats every other preset against a clean original on every source tested,
+  // including a clean one. If this ever flips to a preset that loses on some
+  // source, the product has silently acquired a wrong default nobody can fix
+  // from the UI, because there is no UI.
+  check('ships the measured-dominant configuration, with adaptation on',
+        window.__VU__.persistedDefaults.preset === 'rescue' &&
+        window.__VU__.persistedDefaults.adaptive === true &&
+        window.__VU__.persistedDefaults.autoRestore === true,
+        `preset=${window.__VU__.persistedDefaults.preset} ` +
+        `adaptive=${window.__VU__.persistedDefaults.adaptive} ` +
+        `autoRestore=${window.__VU__.persistedDefaults.autoRestore}`);
+
+  window.__VU__.preset('max');
   window.__VU__.preset(before.preset || 'standard');
   check('leaving Max turns adaptation back off',
         window.__VU__.settings.adaptive === false && window.__VU__.settings.maxWidth === 3840);

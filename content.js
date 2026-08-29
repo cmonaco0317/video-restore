@@ -42,7 +42,7 @@
     // LOCAL CONTRAST boosts the 8-64px band, which is exactly where DCT blocking
     // and mosquito noise live. It is the strongest lever on CLEAN content and
     // the most destructive one on compressed content, so it is kept low here.
-    // Turn Detail up by hand on a good source; do not raise it in this preset.
+    // (There is no longer a way to raise it by hand, which is the point.)
     max:      { sharpen: 0.42, neural: 0, detail: 0.12, vibrance: 0.20, shadow: 0.10, denoise: 0.30, chroma: 0.85, deband: 0.60, temporal: 0.55, antiring: 0.80, saturation: 1.02, contrast: 1.01, gain: 1.00, backproject: 0.00, deblock: 0.70, dering: 0.50 },
     // RESCUE — for a source that is genuinely bad: a low-bitrate rip, an old
     // upload, anything where the picture is breaking into blocks. It is the only
@@ -64,9 +64,24 @@
     rescue:   { sharpen: 0.35, neural: 0, detail: 0.12, vibrance: 0.18, shadow: 0.10, denoise: 0.45, chroma: 0.85, deband: 0.75, temporal: 0.65, antiring: 0.85, saturation: 1.02, contrast: 1.01, gain: 1.00, backproject: 0.00, deblock: 0.90, dering: 0.70 },
   };
 
+  /* There is exactly ONE shipped configuration and the user cannot change it.
+   *
+   * `rescue` is it, and that is a measured choice rather than a taste one: it
+   * beats every other preset against a clean original on every source tested,
+   * INCLUDING a clean one (clean plate 31.80 -> 31.98 dB, crf45 rip 24.26 ->
+   * 24.34, JPEG q0.12 27.46 -> 28.02). There is no source on which picking
+   * something else would have been better, so there is nothing to pick.
+   *
+   * The presets below survive as internal tuning profiles: the test suite and
+   * the ablation harness drive them programmatically via __VU__.preset(), the
+   * A/B split needs an untouched baseline, and if per-shot look adaptation is
+   * ever built and MEASURED it will select among them. They are simply not
+   * surfaced any more.
+   */
   const DEFAULTS = Object.assign({
     enabled: true,
-    mode: 'auto',          // auto | gpu | filter
+    mode: 'auto',          // auto | gpu | filter — resolved automatically, with
+                           // filter as the fallback when frames cannot be read
     upscaler: 'fsr',       // fsr (edge-adaptive EASU) | lanczos
     // OFF by default. Measured against a clean original, the trained doubler is
     // +0.09 dB on a compressed source and -0.11 dB on a clean one versus EASU
@@ -75,8 +90,9 @@
     // (+1.278 dB vs Lanczos-3 on its own test split); it simply does not beat
     // the classical path that actually ships.
     neural: 0,
-    preset: 'standard',
-    renderScale: 1.0,      // supersample factor on top of device pixels
+    preset: 'rescue',      // the only shipped configuration — see above
+    renderScale: 1.0,      // supersample factor on top of device pixels; driven
+                           // by the governor, never by hand any more
     detail: 0.30,          // local contrast — the biggest perceived-quality lever
     vibrance: 0.20,        // saturation that protects skin and already-vivid colour
     shadow: 0.10,          // opens dark scenes without crushing black
@@ -85,12 +101,12 @@
     deblock: 0.45,         // dissolve the 8px DCT grid a low bitrate leaves behind
     dering: 0.30,          // mosquito noise in the skirt around strong edges
     temporal: 0.35,        // multi-frame accumulation (0 = single frame only)
-    adaptive: false,       // Max preset: climb render scale until frames drop
-    autoRestore: false,    // drive deblock/dering from a measurement of the source
-    maxWidth: 3840,
+    adaptive: true,        // climb render scale until frames drop, then back off
+    autoRestore: true,     // drive deblock/dering from a measurement of the source
+    maxWidth: 5120,
     split: 0,
     collapsed: false,
-  }, PRESETS.standard);
+  }, PRESETS.rescue);
 
   /**
    * Blockiness -> deblock strength.
@@ -244,17 +260,39 @@
     return true;
   }
 
+  /* The ONLY keys that survive a reload.
+   *
+   * Everything else is DERIVED — from the source measurement, from the frame
+   * budget, or from the fact that there is exactly one shipped tuning — so
+   * restoring a saved copy would pin someone to a stale configuration they now
+   * have no UI to escape from. Removing the controls turned a recoverable bad
+   * state into an unrecoverable one, and this list is what closes that.
+   *
+   * Not hypothetical, measured on a real upgrade path: an install carrying
+   * `preset:'anime'` from the old build came back with adaptive AND autoRestore
+   * both OFF — every automatic behaviour disabled — and one carrying
+   * `preset:'custom'` came back pinned to detail 0.80, the tuning measured at
+   * 7.07 dB WORSE than doing nothing, with no control left to undo it.
+   *
+   * `split` is excluded on purpose as well: it is a momentary A/B, and coming
+   * back to a half-split picture reads as a broken render.
+   */
+  const PERSIST = ['collapsed'];
+
   function loadSettings() {
     return new Promise((res) => {
       if (!storage) return res();
       try {
         storage.get('vuSettings', (o) => {
           if (!chrome.runtime.lastError && o && o.vuSettings) {
-            for (const k of Object.keys(DEFAULTS)) {
+            for (const k of PERSIST) {
               if (k in o.vuSettings) S[k] = o.vuSettings[k];
             }
-            reconcilePreset();
           }
+          // Re-derive the quality configuration from code every single start,
+          // regardless of what was stored. This is what makes a retune reach an
+          // existing install, and what migrates the old build's saved presets.
+          reconcilePreset();
           res();
         });
       } catch (_) { res(); }
@@ -265,7 +303,11 @@
     if (!storage) return;
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      try { storage.set({ vuSettings: Object.assign({}, S, { split: 0 }) }); } catch (_) {}
+      try {
+        const out = {};
+        for (const k of PERSIST) out[k] = S[k];
+        storage.set({ vuSettings: out });
+      } catch (_) {}
     }, 250);
   }
 
@@ -819,22 +861,15 @@
 .ico:hover { background:rgba(255,255,255,.16); }
 .body { padding:10px; display:grid; gap:9px; }
 .collapsed .body { display:none; }
-.row { display:grid; grid-template-columns:74px 1fr 38px; align-items:center; gap:8px; }
+.row { display:grid; grid-template-columns:74px 1fr 38px; align-items:center; gap:8px;
+  border-top:1px solid rgba(255,255,255,.08); padding-top:9px; }
 .row label { color:#9aa4b2; font-size:11px; }
 .row .val { text-align:right; color:#c8d0da; font-variant-numeric:tabular-nums; font-size:11px; }
 input[type=range] { -webkit-appearance:none; width:100%; height:3px; border-radius:2px;
   background:linear-gradient(90deg,#5b8cff,#8f6bff); outline:none; margin:0; }
 input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:13px; height:13px; border-radius:50%;
   background:#fff; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,.5); }
-.seg { display:flex; gap:4px; }
-.seg button { flex:1; padding:5px 0; font-size:11px; border:1px solid rgba(255,255,255,.12);
-  background:rgba(255,255,255,.04); color:#c8d0da; border-radius:7px; cursor:pointer; }
-.seg button.on { background:#3b62d9; border-color:#5b8cff; color:#fff; }
-.chips { display:flex; flex-wrap:wrap; gap:4px; }
-.chips button { padding:4px 8px; font-size:11px; border:1px solid rgba(255,255,255,.12);
-  background:rgba(255,255,255,.04); color:#c8d0da; border-radius:999px; cursor:pointer; }
-.chips button.on { background:rgba(91,140,255,.25); border-color:#5b8cff; color:#fff; }
-.stat { font-size:10.5px; color:#8b95a3; line-height:1.5; border-top:1px solid rgba(255,255,255,.08); padding-top:8px; }
+.stat { font-size:10.5px; color:#8b95a3; line-height:1.5; }
 .stat b { color:#c8d0da; font-weight:600; font-variant-numeric:tabular-nums; }
 .warn { color:#f5b642; }
 .up { color:#7fd08a; }
@@ -887,40 +922,11 @@ button.mini:disabled { opacity:.55; cursor:default; }
           <button class="ico" data-a="close" title="Turn off (Cmd+Shift+U)">✕</button>
         </div>
         <div class="body">
-          <div class="seg">
-            <button data-m="auto">Auto</button>
-            <button data-m="gpu">GPU</button>
-            <button data-m="filter">Filter</button>
-          </div>
-          <div class="chips">
-            ${Object.keys(PRESETS).map(p => `<button data-p="${p}">${p}</button>`).join('')}
-          </div>
-          <div class="seg">
-            <button data-x="fsr" title="Edge-adaptive; straighter diagonals">FSR / EASU</button>
-            <button data-x="lanczos" title="Classic separable resample">Lanczos</button>
-          </div>
-          <div class="seg">
-            <button data-n="1" title="Trained CNN luma doubler (+1.8 dB over Lanczos)">Neural ON</button>
-            <button data-n="0" title="Classical upscaling only">Neural off</button>
-          </div>
-          ${slider('detail',     'Detail',    0, 1,   0.01)}
-          ${slider('vibrance',   'Vibrance',  0, 1,   0.01)}
-          ${slider('shadow',     'Shadows',   0, 1,   0.01)}
-          ${slider('sharpen',    'Sharpen',   0, 1,   0.01)}
-          ${slider('denoise',    'Denoise',   0, 1,   0.01)}
-          ${slider('deblock',    'Deblock',   0, 1,   0.01)}
-          ${slider('dering',     'Dering',    0, 1,   0.01)}
-          ${slider('deband',     'Deband',    0, 1,   0.01)}
-          ${slider('chroma',     'Colour fix',0, 1,   0.01)}
-          ${slider('temporal',   'Temporal',  0, 0.95, 0.01)}
-          ${slider('antiring',   'Anti-ring', 0, 1,   0.01)}
-          ${slider('saturation', 'Saturation',0.5,1.6,0.01)}
-          ${slider('contrast',   'Contrast',  0.7,1.4,0.01)}
-          ${slider('gain',       'Brightness',0.7,1.4,0.01)}
-          ${slider('renderScale','Render ×',  1,  2,   0.05)}
-          ${slider('split',      'A/B split', 0,  1,   0.01)}
           <div class="stat" data-stat></div>
-          <div class="hint">Hold <b>\`</b> (backtick) to bypass while you watch.</div>
+          ${slider('split', 'A/B split', 0, 1, 0.01)}
+          <div class="hint">Configures itself from the source — nothing to set.
+            Drag <b>A/B split</b>, or hold <b>\`</b> (backtick), to see the
+            untouched picture.</div>
         </div>`;
 
       this.wrap.addEventListener('click', (e) => {
@@ -947,26 +953,21 @@ button.mini:disabled { opacity:.55; cursor:default; }
           });
           return;
         }
-        if (b.dataset.m) { setMode(b.dataset.m); this.refresh(); return; }
-        if (b.dataset.x) { S.upscaler = b.dataset.x; pushSettings(); saveSettings(); this.refresh(); return; }
-        if (b.dataset.n) { S.neural = +b.dataset.n; pushSettings(); saveSettings(); this.refresh(); return; }
-        if (b.dataset.p) { applyPreset(b.dataset.p); this.refresh(); return; }
       });
 
+      /* A/B split is the only input left, and it is deliberately not a setting:
+       * it is how you SEE that the thing is working. Everything that used to be
+       * adjustable here is now driven by measurement — mode from whether frames
+       * can be read, deblock/dering from the source's blockiness, back-projection
+       * from the same measurement, render scale from the frame budget.
+       *
+       * The three "touching this by hand takes control back from the governor"
+       * escape hatches that used to live here are gone with the sliders that
+       * needed them. Nothing rewrites split, so nothing has to yield to it. */
       this.wrap.addEventListener('input', (e) => {
         const k = e.target.dataset.k;
-        if (!k) return;
-        S[k] = parseFloat(e.target.value);
-        // Touching Render x by hand hands control back to you. Without this the
-        // governor simply overwrites the value on its next 2s window, which
-        // makes the slider look broken.
-        if (k === 'renderScale' && S.adaptive) { S.adaptive = false; S.preset = 'custom'; }
-        // Same reasoning for Deblock/Dering: while auto-restore is measuring the
-        // source it rewrites both every 2s, so a hand-set value would silently
-        // snap back and the slider would look broken. Touching either takes
-        // control back.
-        if ((k === 'deblock' || k === 'dering') && S.autoRestore) S.autoRestore = false;
-        if (k !== 'split' && k !== 'renderScale') S.preset = 'custom';
+        if (k !== 'split') return;
+        S.split = parseFloat(e.target.value);
         this.syncValues();
         pushSettings();
         saveSettings();
@@ -1000,12 +1001,8 @@ button.mini:disabled { opacity:.55; cursor:default; }
         const k = inp.dataset.k;
         inp.value = S[k];
         const out = this.wrap.querySelector(`[data-v="${k}"]`);
-        if (out) out.textContent = (k === 'renderScale') ? S[k].toFixed(2) + '×' : Number(S[k]).toFixed(2);
+        if (out) out.textContent = Number(S[k]).toFixed(2);
       }
-      for (const b of this.wrap.querySelectorAll('[data-p]')) b.classList.toggle('on', b.dataset.p === S.preset);
-      for (const b of this.wrap.querySelectorAll('[data-m]')) b.classList.toggle('on', b.dataset.m === S.mode);
-      for (const b of this.wrap.querySelectorAll('[data-x]')) b.classList.toggle('on', b.dataset.x === S.upscaler);
-      for (const b of this.wrap.querySelectorAll('[data-n]')) b.classList.toggle('on', +b.dataset.n === S.neural);
     }
 
     refresh() { this.syncValues(); this.refreshStats(); }
@@ -1033,10 +1030,10 @@ button.mini:disabled { opacity:.55; cursor:default; }
         `<b>${esc(s.src)}</b> → <b>${esc(s.out)}</b>` +
         (s.mode === 'gpu' ? (s.paused ? ' &nbsp;·&nbsp; <b>paused</b>' : ` &nbsp;·&nbsp; <b>${s.fps | 0}</b> fps`) : '') +
         `<br>mode: <b>${s.mode === 'gpu' ? ((s.neural ? 'neural + ' : '') + (S.upscaler === 'fsr' ? 'EASU + RCAS' : 'Lanczos-3 + RCAS')) : 'CSS filter'}</b>` +
-        (s.mode === 'gpu' && S.adaptive ? `<br>max: auto render ×<b>${S.renderScale.toFixed(2)}</b>` : '') +
+        (s.mode === 'gpu' && S.adaptive ? `<br>render ×<b>${S.renderScale.toFixed(2)}</b>` : '') +
         (s.mode === 'gpu' && S.autoRestore && u.grid
           ? `<br>source: <b>${u.grid.blockiness < 1.3 ? 'clean' : u.grid.blockiness < 2 ? 'compressed' : 'heavily compressed'}</b>` +
-            ` &nbsp;·&nbsp; deblock <b>${autoDeblock(u.grid.blockiness).toFixed(2)}</b> (auto)` +
+            ` &nbsp;·&nbsp; deblock <b>${autoDeblock(u.grid.blockiness).toFixed(2)}</b>` +
             (autoBackproject(u.grid.blockiness) > 0.05
               ? `<br><span class="up">reconstructing from ${S.temporal > 0 ? 'multiple frames' : 'the observed pixels'}</span>`
               : '') : '') +
@@ -1233,7 +1230,10 @@ button.mini:disabled { opacity:.55; cursor:default; }
     redraw() { for (const u of units.values()) u.draw(); return units.size; },
     preset(name) { applyPreset(name); panel && panel.refresh(); return S.preset; },
     presets: PRESETS,
-    persistedKeys: Object.keys(DEFAULTS),
+    persistedKeys: PERSIST,
+    /* The shipped baseline, so a test can assert what a fresh install gets.
+     * Distinct from `settings`, which is the live mutated state. */
+    persistedDefaults: DEFAULTS,
     reconcile: reconcilePreset,
     governor: quality,
     autoDeblock,

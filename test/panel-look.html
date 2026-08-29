@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Video Upscaler — look at the panel</title>
+<!-- The panel, rendered for a human to LOOK at, over a synthetic moving source.
+     Not part of test/run.py: the DOM assertions in integration.html prove the
+     panel's structure, and this proves it is legible, which no assertion can.
+     Serve the folder and open it; the panel mounts itself bottom-right.
+     Kept for the same reason test/look.html is — see that file's header. -->
+<style>
+  body { background:#0d1018; color:#dfe6ef; font:13px/1.6 -apple-system,sans-serif; margin:24px; }
+  h1 { font-size:15px; margin:0 0 4px; }
+  p  { color:#8b95a3; margin:0 0 16px; font-size:12px; }
+  #stage { position:static; border:7px solid #2a3350; padding:11px 19px;
+           width:720px; background:#000; }
+  video { display:block; width:720px; height:300px; background:#000; object-fit:contain; }
+</style>
+<h1>Video Upscaler — panel</h1>
+<p>Everything the user can now touch. The panel starts collapsed on auto-run;
+   this page invokes it manually, which opens it.</p>
+<div id="stage"><video id="v" muted playsinline autoplay></video></div>
+
+<script>
+  // A moving source, so fps and the source measurement have something real to
+  // report. Same generator as integration.html.
+  const SRC_W = 480, SRC_H = 270;
+  const src = document.createElement('canvas');
+  src.width = SRC_W; src.height = SRC_H;
+  const sctx = src.getContext('2d');
+  let f = 0;
+  setInterval(() => {
+    for (let y = 0; y < SRC_H; y += 6) for (let x = 0; x < SRC_W; x += 6) {
+      const v = ((x + y + f) % 24 < 12) ? 235 : 30;
+      sctx.fillStyle = `rgb(${v},${(v * 0.7) | 0},${255 - v})`;
+      sctx.fillRect(x, y, 6, 6);
+    }
+    f += 2;
+  }, 33);
+  const video = document.getElementById('v');
+  video.srcObject = src.captureStream(30);
+  window.__VU_MANUAL__ = true;      // manual invoke => panel opens expanded
+</script>
+<script src="../cnn-weights.js"></script>
+<script src="../core.js"></script>
+<script src="../source-probe.js"></script>
+<script src="../content.js"></script>

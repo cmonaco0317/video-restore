@@ -10,7 +10,7 @@ truth; this prose is one session's account.**
 ```bash
 cd "$HOME/Desktop/AI Projects/video-upscaler"
 ledger status
-python3 test/run.py          # ~106-108 passed, 0 failed as of 2026-08-10
+python3 test/run.py          # ~109-111 passed, 0 failed as of 2026-08-29
                              # (the count wobbles by 2: test/webgpu.html races the
                              #  headless runner's virtual clock during GPU init. It
                              #  never FAILS - one check is emitted synchronously so
@@ -26,9 +26,33 @@ Full architecture, controls and the output-path matrix are in `README.md`; the
 neural upscaler's whole story is in `cnn/README.md`.
 
 **Verified (`ledger status`):** package loads · render pipeline correct ·
-perf inside the 60 fps budget · max does not damage compressed video · the
-neural stage is honestly characterised · **the restore stage measurably removes
-compression damage** · **Rescue beats the old best preset on every source**.
+perf inside the 60 fps budget · the shipped tuning does not damage compressed
+video · the neural stage is honestly characterised · **the restore stage
+measurably removes compression damage** · **the shipped tuning beats every
+alternative on every source** · **there are no settings to get wrong**.
+
+⭐ **2026-08-29 — IT IS NOW FULLY AUTOMATIC. The settings are gone.** The panel
+had a mode picker, a preset picker, an upscaler picker, a neural toggle and 16
+sliders. It now has exactly one input (A/B split) and one key (backtick), and
+NEITHER changes the picture — they exist so you can see it working. Everything
+else is driven by measurement: mode from whether frames can be read, deblock and
+dering from the source's blockiness, back-projection from the same measurement,
+render scale from the frame budget, overall effort from how far the source is
+being stretched.
+
+The shipped tuning is `rescue`, and that is a MEASURED choice, not a taste one —
+it beats every other preset against a clean original on every source tested,
+including a clean one. There was no source on which picking differently would
+have helped, so there was nothing to pick.
+
+⚠️ **The PRESETS table still exists and must not be deleted.** It is now internal:
+the test suite and the ablation harness drive profiles through `__VU__.preset()`,
+the A/B split needs an untouched baseline, and if per-shot look adaptation is ever
+built and measured it will select among them. They are simply not surfaced.
+
+⚠️ **What is NOT automatic, deliberately:** fetching a better source. It is the
+only lever that adds information, and it is the one thing left with a button,
+because quadrupling someone's bitrate is their bandwidth and not ours.
 
 **✅ The screenshare path is now PROVEN** (`tools/verify-screenshare.py`, a
 ledger claim). Capturing the window with the upscaler off and then on, over a
@@ -115,6 +139,21 @@ traced to this.
 preset *definitions*, so retuning a preset never reached anyone who had already
 picked it. `reconcilePreset()` fixes this; only `preset === 'custom'` restores
 saved values verbatim.
+
+🔴 **And on its own it was NOT enough to make the settings removal safe** — this
+was caught by testing the upgrade path rather than the fresh install. It
+re-derives from `PRESETS[S.preset]`, but `S.preset` was itself being restored
+from storage, so an old install carrying `preset:'anime'` came back with
+**adaptive AND autoRestore both off** (every automatic behaviour disabled) and
+one carrying `preset:'custom'` came back pinned to **detail 0.80 — measured
+7.07 dB worse than doing nothing** — with no control left to undo it. Removing
+the UI turned a recoverable bad state into an unrecoverable one.
+
+The fix is the `PERSIST` allowlist in content.js: **`collapsed` is the only key
+that survives a reload.** Every quality value re-derives from code on every
+start. Two checks in `test/integration.html` hold that line, and one of them is
+deliberately INVERTED from the assertion it replaced — the old bug was a quality
+key *missing* from the persisted set, the new bug is one *present* in it.
 
 **🔴 The engine uploads with `UNPACK_FLIP_Y_WEBGL`.** Convolution is *not*
 flip-invariant, so the CNN's vertical kernel taps are negated AND the pixel-shuffle
@@ -351,10 +390,13 @@ every source tested, including a clean one** — so auto cannot honestly be sold
 auto buys is that the user never has to know, plus **per-shot** adaptation within
 one video, which no static preset can do and which is **not yet measured**.
 
-Order to build it: (1) ship `rescue` + auto as the only mode and delete the preset
-picker — no new measurement needed; (2) extend auto-tuning to denoise/deband/
-chroma on the existing ground-truth rig; (3) **measure** whether per-shot look
-adaptation beats a fixed look before building it.
+Order to build it: ~~(1) ship `rescue` + auto as the only mode and delete the
+preset picker~~ ✅ **DONE 2026-08-29** — see "IT IS NOW FULLY AUTOMATIC" above and
+the `no-settings-to-get-wrong` claim. **(2) extend auto-tuning to denoise, deband
+and chroma** on the existing ground-truth rig — these have valid objectives and
+the ablation table says they are near-neutral, so it is low-risk and measurable.
+**(3) MEASURE whether per-shot look adaptation beats a fixed look** before
+building it; the project's own metric suggests it may not.
 
 🔴 **Two risks worth writing down now.** Parameters that change mid-shot make the
 picture *pump*, and there is **no test in the suite that would catch that** — the
@@ -380,6 +422,8 @@ cnn/                 training pipeline (venv, CC-BY data, gitignored scratch)
 test/run.py          one-command headless suite; tools/check-package.py
 test/compare.html    visual A/B for the restore stage — serve the folder and open
                      it; the eye check the numbers cannot make
+test/panel-look.html the panel, rendered for a human to look at. The DOM
+                     assertions prove its structure; this proves it is legible
 test/webgpu.html     the WebGPU-vs-WebGL2 measurement that retired the idea of
                      porting the engine; correctness runs headless, timings need
                      a real window

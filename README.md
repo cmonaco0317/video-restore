@@ -112,15 +112,15 @@ player's own AirPlay button.**
 
 **GPU mode** (default where possible) — eight stages. Several fold into one GPU
 pass and several are skipped when their strength is zero, so a presented frame
-costs 5–7 passes depending on settings:
+costs 5–7 passes depending on what the source needs:
 
 1. **restore**, at source resolution and **first in the chain** — **deblock** and
    **dering**, the only stage that repairs damage done by the *encoder* rather
    than by scaling. It runs before everything else because otherwise the rest of
    the chain amplifies the artifacts instead of the picture. Its strength, and
    the transform grid's phase and period, are **measured off the source** rather
-   than assumed. Full detail under [`rescue`](#unless-the-source-is-genuinely-bad-then-pick-rescue)
-   below.
+   than assumed. Full detail under
+   [when the source is genuinely bad](#when-the-source-is-genuinely-bad) below.
 2. **clean**, at source resolution — edge-preserving bilateral denoise, **deband**
    to dissolve the contour steps low-bitrate gradients break into, and **chroma
    reconstruction**. Video is 4:2:0: colour is stored at quarter resolution, so
@@ -190,59 +190,68 @@ It falls back to Filter mode automatically, and tells you why in the panel, when
 Separately: DRM video shows up **black in any screen capture** on macOS regardless
 of this extension. That's the OS and the DRM stack, and nothing here changes it.
 
-## Controls
+## Nothing to configure
 
-Panel is draggable and collapsible. Everything persists across pages.
+**There are no settings.** The panel has one control and one key, and neither of
+them changes the picture — they exist so you can *see* that it is working:
 
-- **Auto / GPU / Filter** — force a mode
-- **Neural ON / off** — the trained CNN doubler
-- **FSR / EASU** vs **Lanczos** — swap the upscaler live and A/B it
-- **Detail · Vibrance · Shadows** — the perceived-quality controls
-- Presets: `subtle` · `standard` · `film` · `sports` · `anime` · `reference` · **`max`** · **`rescue`**
-- Sharpen · Denoise · **Deblock** · **Dering** · **Deband** · **Colour fix** · **Temporal** · Anti-ring · Saturation · Contrast · Brightness
-- **Render ×** — supersample above native pixels (1.0 is right for most cases)
 - **A/B split** — drag to reveal the untouched source on the left
 - Hold **`** (backtick) to bypass entirely while watching
 
-The panel reads out `source → output` resolution and live fps, so you can confirm
-it's doing something. It follows the video into fullscreen.
+It reads out `source → output` resolution, live fps, what it measured your source
+to be, and what it decided to do about it. It is draggable, collapsible, and
+follows the video into fullscreen.
 
-## Just pick `max`
+### What it decides, and what it decides from
 
-**`max` is the one to pick.** Everything on, tuned to look its best. It is the
-strongest preset in the panel — there is deliberately nothing better to choose,
-and a test fails if any other preset ever scores higher on the perceived-quality
-controls. Pick it once and it persists; a test also checks that every value it
-sets survives a reload, because a setting that silently reverts is the reason
-people end up re-picking their preferences every session.
+| Decision | Driven by |
+|---|---|
+| GPU or CSS-filter mode | whether frames can actually be read (DRM, cross-origin, no WebGL2) |
+| Deblock strength | measured blockiness of the source, on a curve fitted to four measured optima |
+| Which grid to deblock | the transform grid's phase and period, **detected per axis** |
+| Back-projection gain | the same blockiness measurement — full on a clean source, zero by the time blocking is merely noticeable |
+| Render scale | the frame budget, closed-loop |
+| Effort overall | how far the source is being stretched — a 480p film going to 4K gets materially more sharpening and deband than a 1080p one |
 
-It is *not* every-slider-at-100%. That rings, smears and wrecks colour. What
-makes it the top setting is that everything is on and two things become adaptive:
-
-**It climbs until it stops being visible — or until your GPU objects, whichever
-comes first.** Render scale steps up every few seconds while frames are clean and
+**Render scale climbs until it stops being visible — or until your GPU objects,
+whichever comes first.** It steps up every few seconds while frames are clean and
 steps back down the moment they are not. The drop signal is exact rather than
 guessed: `requestVideoFrameCallback` reports how many frames the browser actually
 presented, so if that counter outruns our callbacks, those are frames we failed
 to keep up with. Deliberate hysteresis stops it oscillating. The ceiling is
-**x1.25 of the video's device-pixel size** — past that the compositor discards
-the extra, so climbing further costs battery for pixels nobody sees.
+**×1.25 of the video's device-pixel size** — past that the compositor discards the
+extra, so climbing further costs battery for pixels nobody sees.
 
-**It scales effort to the source.** A 480p film stretched to 4K gets materially
-more sharpening and deband than a 1080p one.
+### Why there is only one configuration
 
-`max` is deliberately *not* the most faithful setting — local contrast, vibrance
-and shadow lift push past what was encoded, which is what every TV ships doing.
-If you ever want the source as authored, that is **`reference`**.
+Because the best one was already found, and it is not a close call. The tuning
+that ships beats every alternative **on every source measured against a clean
+original, including a clean source** — 31.80 → 31.98 dB on a clean plate,
+27.46 → 28.02 on a badly blocked one. There is no source on which picking
+something else would have been better, so there is nothing to pick.
 
-If max is too much on some content, the two sliders to pull back are **Detail**
-and **Vibrance**; adaptation stays on when you do.
+What no measurement here can set is the *look*. Local contrast, vibrance and
+shadow lift deliberately push the picture away from what was encoded, so
+distance-to-truth drives all three to zero — measured, on both clean and
+compressed sources. They ship at fixed conservative values (local contrast at
+0.12, cut hard after the old tuning was measured putting a crf45 rip **7.07 dB
+further from ground truth than doing nothing**). Calling that automatic would be
+a lie: it is one taste decision, made once, and held.
 
-## …unless the source is genuinely bad, then pick `rescue`
+### The one thing it will not decide for you
 
-Everything else in this extension repairs damage done by *scaling*. `rescue` is
-the preset that goes after damage done by the *encoder* — the thing that actually
-makes a low-bitrate rip look like a low-bitrate rip.
+Fetching a better source is the only lever that adds information rather than
+redistributing it — and it is the one thing left with a button. Quadrupling
+someone's bitrate is their bandwidth, not ours, so when a better stream is
+available the panel says so and waits. Probing is passive and costs nothing.
+
+
+## When the source is genuinely bad
+
+Everything else in this extension repairs damage done by *scaling*. The restore
+stage goes after damage done by the *encoder* — the thing that actually makes a
+low-bitrate rip look like a low-bitrate rip. It is always on, and how hard it
+works is measured from your source rather than chosen.
 
 Two artifacts, two mechanisms, both new:
 
@@ -288,8 +297,9 @@ re-encoded can carry its transform grid anywhere, and filtering the wrong phase
 smooths real detail while leaving the artifact. On a picture shifted 3px,
 detecting the phase leaves blockiness 1.447 where assuming the origin leaves
 1.978; on a 4×4 transform grid (AV1/HEVC), treating it as period 4 leaves 1.038
-against 1.202 for period 8. Move the Deblock or Dering slider and you take
-control back, exactly like Render ×.
+against 1.202 for period 8. There is no way to override any of this by hand,
+which is deliberate: every one of these numbers came out of a measurement, and a
+slider next to it would only offer you the chance to be wrong.
 
 **What it will not do is make a bad source look great.** The detail is not
 hiding under the artifacts; the encoder discarded it. This takes the mess off the
@@ -408,12 +418,13 @@ cd "$HOME/Desktop/AI Projects/video-upscaler" && python3 -m http.server 8791
 
 `ledger status` in this folder is the machine-checked truth:
 
-**16 active claims: 14 passing, 0 failing, 2 awaiting hardware.**
+**17 active claims: 15 passing, 0 failing, 2 awaiting hardware.**
 
 | | claim |
 |---|---|
 | PASS | `pkg-loadable` — valid MV3 package Chrome can load unpacked |
 | PASS | `render-pipeline` — GPU correctness + DOM integration |
+| PASS | **`no-settings-to-get-wrong`** — one input, zero pickers, and no quality value survives a reload |
 | PASS | `perf-budget-reconstruction` — 1080p→4K in 10.54 ms of a 16.7 ms budget |
 | PASS | `no-harm-on-bad-sources` — `max` stays within 1.0 dB of untouched on a crf45 rip |
 | PASS | `restore-removes-compression-damage` — 75% of the excess blocking, with the signature a blur cannot fake |
@@ -566,4 +577,6 @@ core.js            WebGL2 engine — no chrome.* APIs, so it is testable standal
 content.js         video discovery, overlay geometry, DRM fallback, control panel
 tools/make-icons.py  generates icons/ from scratch, no deps
 test/              harness.html (GPU) · integration.html (DOM)
+                   compare.html / look.html / panel-look.html — serve the folder
+                   and open them; the eye checks the numbers cannot make
 ```

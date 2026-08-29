@@ -2,7 +2,7 @@
   "_README": "This file is the project's verification ledger. Claims record what is believed true about this project AND the command that proves it. Do not delete or reword claims to make them pass, and never hand-edit a status to 'passing' -- only `ledger run` may do that. If a claim is obsolete, mark it retired with `ledger retire`, which preserves it.",
   "project": "video-upscaler",
   "created": "2026-08-05T02:10:54+00:00",
-  "updated": "2026-08-29T22:29:04+00:00",
+  "updated": "2026-08-29T22:41:05+00:00",
   "claims": [
     {
       "id": "pkg-loadable",
@@ -390,6 +390,20 @@
       "exit_code": null,
       "evidence": null,
       "notes": "Genuinely needs hardware this machine does not have: system_profiler reports a single built-in display (Connection Type: Internal) and no AirPlay receivers were discoverable on the network. The screenshare third of the original claim is now automated separately and passing.",
+      "slow": false,
+      "needs": []
+    },
+    {
+      "id": "no-settings-to-get-wrong",
+      "claim": "the extension is fully automatic and there is nothing for a user to misconfigure: the panel exposes exactly ONE input (A/B split) and zero preset/mode/upscaler/neural pickers, neither of which changes the picture \u2014 they exist to make the effect visible. Everything that alters the output is driven by measurement (mode from whether frames can be read, deblock/dering from the source's blockiness, back-projection from that same measurement, render scale from the frame budget). The shipped tuning is 'rescue', a MEASURED choice: it beats every alternative against a clean original on every source tested, including a clean one. Critically, NO quality value survives a reload \u2014 'collapsed' is the only persisted key \u2014 so a retune reaches every existing install and an old install carrying a stale preset re-derives onto the shipped tuning instead of being pinned to it forever with no UI to escape",
+      "verify": "python3 test/run.py",
+      "cwd": ".",
+      "status": "passing",
+      "last_run": "2026-08-29T22:40:53+00:00",
+      "last_verified": "2026-08-29T22:40:53+00:00",
+      "exit_code": 0,
+      "evidence": "...(truncated)...\n still \u00d71.05 two clean windows after backing off\nPASS  governor climbs again once frames stay clean\n        1.05 -> 1.15 after four clean windows (~8s)\nPASS  governor stops at the visible-pixel ceiling, not the GPU limit\n        settles at \u00d71.25 after 40 clean windows (ceiling 1.25)\nPASS  no manual Render x control exists to override the governor\nPASS  the panel exposes exactly one input, and it is A/B split\n        inputs: split\nPASS  no preset / mode / upscaler / neural pickers remain in the panel\n        0 picker control(s) still present\nPASS  ships the measured-dominant configuration, with adaptation on\n        preset=rescue adaptive=true autoRestore=true\nPASS  leaving Max turns adaptation back off\nPASS  toggle off removes overlay, panel and inline filters\n        parent position restored: \"(none)\"\nPASS  manual invoke re-attaches and opens the panel\n\n=== WebGPU compute path (test/webgpu.html) ===\nrunning\u2026\nPASS  WebGPU is available to test at all\n        navigator.gpu present\nPASS    [diagnostic] adapter\n        apple / metal-3 \u00b7 shader-f16 yes \u00b7 workgroup storage 32768 bytes\n\n\u001b[32m110 passed, 0 failed, 1 skipped\u001b[0m\n\u001b[2mSKIP = not measurable headlessly; see the detail line.\u001b[0m",
+      "notes": "",
       "slow": false,
       "needs": []
     }
